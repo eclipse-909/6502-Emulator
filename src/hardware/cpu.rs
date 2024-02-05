@@ -5,7 +5,13 @@ use crate::hardware::{
 
 pub struct Cpu {
 	specs: HardwareSpecs,
-	cpu_clock_counter: u128
+	cpu_clock_counter: u128,
+	PC: u16,
+	SP: u16,
+	A: u8,
+	X: u8,
+	Y: u8,
+	NV_BDIZC: u8
 }
 
 impl Hardware for Cpu {
@@ -14,7 +20,13 @@ impl Hardware for Cpu {
 	fn new() -> Self {
 		let cpu: Self = Self {
 			specs: HardwareSpecs::new_default("Cpu"),
-			cpu_clock_counter: 0
+			cpu_clock_counter: 0,
+			PC: 0xfffc,//0xfffc and 0xfffd hold the address that the program starts at
+			SP: 0x01ff,//stack grows down
+			A: 0x00,
+			X: 0x00,
+			Y: 0x00,
+			NV_BDIZC: 0b00110001
 		};
 		cpu.log("Created");
 		return cpu;
