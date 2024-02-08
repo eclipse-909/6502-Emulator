@@ -1,22 +1,15 @@
 use {
-	tokio::{
-		time::{sleep, Duration},
-		sync::Mutex
-	},
-	std::sync::{
-		Arc,
-		atomic::AtomicBool
-	},
+	tokio::time::{sleep, Duration},
 	crate::hardware::{
 		clock::Clock,
-		hardware::{Hardware, HardwareSpecs}
+		hardware::{Hardware, HardwareSpecs},
+		imp::clock_listener::ClockListener
 	}
 };
 
 pub struct System {
 	specs: HardwareSpecs,
-	clock: Clock,
-	running: Arc<Mutex<AtomicBool>>//Temporary code - Since I am stopping the server setting running to false in another task, I need a mutex for now
+	clock: Clock
 }
 
 impl Hardware for System {
@@ -25,8 +18,7 @@ impl Hardware for System {
 	fn new() -> Self {
 		let system: Self = Self {
 			specs: HardwareSpecs::new_default("System"),
-			clock: Clock::new(),
-			running: Arc::new(Mutex::new(AtomicBool::from(false)))
+			clock: Clock::new()
 		};
 		system.log("Created");
 		return system;
@@ -34,26 +26,29 @@ impl Hardware for System {
 }
 
 impl System {
-	const CLOCK_INTERVAL_MICRO: u64 = 100_000;//number is in microseconds or 0.001 milliseconds
+	const CLOCK_INTERVAL_MICRO: u64 = 10_000;//number is in microseconds or 0.001 milliseconds
 	
-	pub async fn start_system(&mut self) {
-		*self.running.lock().await = AtomicBool::from(true);
-		self.clock.memory.display_memory(0x0000, 0x0014);
-		//Temporary code
-		let clone_running: Arc<Mutex<AtomicBool>> = Arc::clone(&self.running);
-		tokio::spawn(async move {
-			tokio::time::sleep(Duration::from_secs(1)).await;//for now, I will just stop the system after 1 second has passed
-			*clone_running.lock().await = AtomicBool::from(false);
-		});
-		//Temporary code
-		loop {
-			if !*self.running.lock().await.get_mut() {return;}
-			self.clock.invoke();
-			sleep(Duration::from_micros(Self::CLOCK_INTERVAL_MICRO)).await;
-		}
+	/**Loads a set of instructions into memory and tells the cpu to start there.*/
+	pub fn load_main_program(&mut self, address: u16, program: &[u8]) {
+		let le_address: (u8,u8) = Self::u16_to_little_endian(&address);
+		self.clock.cpu.memory.set_range(0xfffc, &[le_address.0, le_address.1]);
+		self.clock.cpu.memory.set_range(address, program);
 	}
 	
-	async fn stop_system(&mut self) {
-		*self.running.lock().await = AtomicBool::from(false);
+	/**loads a set of instructions into memory.*/
+	pub fn load_program(&mut self, address: u16, program: &[u8]) {self.clock.cpu.memory.set_range(address, program);}
+	
+	pub async fn start_system(&mut self) {
+		self.clock.cpu.running = true;
+		self.clock.cpu.memory.display_memory(0x0000, 0x0014);
+		let (i, ii) = (self.clock.cpu.fetch(), self.clock.cpu.fetch());
+		self.clock.cpu.PC = Self::little_endian_to_u16(i, ii);
+		self.clock.cpu.specs.debug = false;
+		self.clock.cpu.memory.specs.debug = false;
+		loop {
+			if !self.clock.cpu.running {return;}
+			self.clock.pulse();
+			sleep(Duration::from_micros(Self::CLOCK_INTERVAL_MICRO)).await;
+		}
 	}
 }

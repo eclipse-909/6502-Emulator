@@ -3,12 +3,15 @@ use crate::hardware::{
 	imp::clock_listener::ClockListener
 };
 
-/**Contains RAM, I/O, and ROM. Use get and set functions to use memory. Accessing non-addressable memory may lead to undefined behavior.*/
+/**Contains RAM, I/O, and ROM. Use get and set functions to use memory.
+Accessing non-addressable memory will cause the program to panic (e.g. 0x8000), or do nothing (e.g. 0x8030).*/
 pub struct Memory {
-	specs: HardwareSpecs,
+	pub specs: HardwareSpecs,
 	
 	/**
 	Addressable: 0x0000 - 0x7fff
+	
+	Zero Page: 0x0000 - 0x00ff
 	
 	Stack: 0x0100 - 0x01ff
 	 */
@@ -48,6 +51,7 @@ impl Hardware for Memory {
 }
 
 impl ClockListener for Memory {
+	//I'm not really sure what purpose this will serve, but I'll refactor my get, set, and set_range functions if I need to
 	fn pulse(&mut self) {self.log("Received clock pulse");}
 }
 
@@ -71,6 +75,18 @@ impl Memory {
 		}
 	}
 	
+	/**Gets the bytes at the given address as an array slice with the given length*/
+	pub fn get_range(&self, address: u16, len: u16) -> &[u8] {
+		let address: usize = address as usize;
+		return if address < 0x8000 {
+			&self.ram[address .. address + len as usize]
+		} else if address < 0x9010 {
+			&self.io[address - 0x8010 .. address - 0x8010 + len as usize]
+		} else {
+			&self.rom[address - 0xa000 .. address - 0xa000 + len as usize]
+		}
+	}
+	
 	/**Sets the byte at the given address with the given value.*/
 	pub fn set(&mut self, address: u16, value: u8) {
 		let address: usize = address as usize;
@@ -80,6 +96,24 @@ impl Memory {
 			self.io[address - 0x8010] = value;
 		} else {
 			self.rom[address - 0xa000] = value;
+		}
+	}
+	
+	/**Sets the bytes in memory to the corresponding values given.*/
+	pub fn set_range(&mut self, address: u16, values: &[u8]) {
+		let address: usize = address as usize;
+		if address < 0x8000 {
+			for (i, value) in values.iter().enumerate() {
+				self.ram[address + i] = *value;
+			}
+		} else if address < 0x9010 {
+			for (i, value) in values.iter().enumerate() {
+				self.io[address - 0x8010 + i] = *value;
+			}
+		} else {
+			for (i, value) in values.iter().enumerate() {
+				self.rom[address - 0xa000 + i] = *value;
+			}
 		}
 	}
 }

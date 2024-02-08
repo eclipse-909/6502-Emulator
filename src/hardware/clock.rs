@@ -1,14 +1,12 @@
 use crate::hardware::{
 	hardware::{Hardware, HardwareSpecs},
 	imp::clock_listener::ClockListener,
-	cpu::Cpu,
-	memory::Memory
+	cpu::Cpu
 };
 
 pub struct Clock {
 	specs: HardwareSpecs,
-	pub cpu: Cpu,
-	pub memory: Memory,
+	pub cpu: Cpu
 }
 
 impl Hardware for Clock {
@@ -18,18 +16,16 @@ impl Hardware for Clock {
 	fn new() -> Self {
 		let clock: Self = Self {
 			specs: HardwareSpecs::new_default("Clock"),
-			cpu: Cpu::new(),
-			memory: Memory::new()
+			cpu: Cpu::new()
 		};
 		clock.log("Created");
 		return clock;
 	}
 }
 
-impl Clock {
+impl ClockListener for Clock {
 	/**Called on each clock cycle. Calls the pulse method on each listener registered.*/
-	pub fn invoke(&mut self) {
+	fn pulse(&mut self) {
 		self.cpu.pulse();
-		self.memory.pulse();
 	}
 }

@@ -3,7 +3,7 @@ use std::time::Instant;
 pub struct HardwareSpecs {
 	id: u8,
 	name: String,
-	debug: bool
+	pub debug: bool
 }
 
 static mut START_TIME: Option<Instant> = None;
@@ -38,5 +38,17 @@ pub trait Hardware {
 		if self.get_specs().debug {
 			println!("ID: {} - Name: {} - Time: {:?} - Message: {}", self.get_specs().id, self.get_specs().name, Self::elapsed_ms(), message);
 		}
+	}
+	
+	fn u16_to_little_endian(value: &u16) -> (u8, u8) {
+		let byte1: u8 = (value & 0xFF) as u8;
+		let byte2: u8 = ((value >> 8) & 0xFF) as u8;
+		return (byte1, byte2);
+	}
+	
+	fn little_endian_to_u16(i: u8, ii: u8) -> u16 {
+		let byte1 = i as u16;
+		let byte2 = ii as u16;
+		return byte1 | (byte2 << 8);
 	}
 }
