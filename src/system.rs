@@ -1,10 +1,13 @@
 use {
-	tokio::time::{sleep, Duration},
 	crate::hardware::{
 		clock::Clock,
 		hardware::{Hardware, HardwareSpecs},
 		imp::clock_listener::ClockListener
-	}
+	},
+	std::{
+		thread::sleep,
+		time::Duration
+	},
 };
 
 pub struct System {
@@ -26,7 +29,7 @@ impl Hardware for System {
 }
 
 impl System {
-	const CLOCK_INTERVAL_MICRO: u64 = 10_000;//number is in microseconds or 0.001 milliseconds
+	const CLOCK_INTERVAL_MICRO: u64 = 1_000;//number is in microseconds or 0.001 milliseconds
 	
 	/**Loads a set of instructions into memory and tells the cpu to start there.*/
 	pub fn load_main_program(&mut self, address: u16, program: &[u8]) {
@@ -38,7 +41,7 @@ impl System {
 	/**loads a set of instructions into memory.*/
 	pub fn load_program(&mut self, address: u16, program: &[u8]) {self.clock.cpu.memory.set_range(address, program);}
 	
-	pub async fn start_system(&mut self) {
+	pub fn start_system(&mut self) {
 		self.clock.cpu.running = true;
 		self.clock.cpu.memory.display_memory(0x0000, 0x0014);
 		let (i, ii) = (self.clock.cpu.fetch(), self.clock.cpu.fetch());
@@ -48,7 +51,7 @@ impl System {
 		loop {
 			if !self.clock.cpu.running {return;}
 			self.clock.pulse();
-			sleep(Duration::from_micros(Self::CLOCK_INTERVAL_MICRO)).await;
+			sleep(Duration::from_micros(Self::CLOCK_INTERVAL_MICRO));
 		}
 	}
 }
