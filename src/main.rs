@@ -6,13 +6,12 @@ use crate::{
 mod system;
 mod hardware;
 
-#[tokio::main]
-async fn main() {
+fn main() {
 	let _ = System::elapsed_ms();//initializes the timer to get the elapsed time
 	let mut system: System = System::new();
 	system.load_main_program(MAIN_ADDR, MAIN_PROGRAM);
 	system.load_program(PRINT_STR_ADDR, PRINT_STR_PROGRAM);
-	system.start_system().await;
+	system.start_system();
 }
 
 pub const MAIN_ADDR: u16 = 0x0300;
