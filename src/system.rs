@@ -10,6 +10,11 @@ use {
 	},
 };
 
+/**This program is heavily object-oriented. The program is build around the System,
+which is the top node in the hierarchy of composed objects.
+System has a Clock, which has a Cpu, which has a Memory. I very much dislike this structure because
+unnecessary encapsulation is the least scalable and most un-refactorable way to go about making this program.
+I will likely try to change the structure in the future to accommodate the instructions that will be given in lab 2.*/
 pub struct System {
 	specs: HardwareSpecs,
 	clock: Clock
