@@ -1,10 +1,7 @@
-use crate::{
-	hardware::{
-		hardware::{Hardware, HardwareSpecs},
-		memory::Memory,
-		imp::clock_listener::ClockListener,
-	},
-	PRINT_STR_ADDR
+use crate::hardware::{
+	hardware::{Hardware, HardwareSpecs},
+	memory::Memory,
+	imp::clock_listener::ClockListener,
 };
 
 pub struct Cpu {
@@ -34,7 +31,7 @@ impl Hardware for Cpu {
 			A: 0x00,
 			X: 0x00,
 			Y: 0x00,
-			NV_BDIZC: 0b00110001
+			NV_BDIZC: 0b00100000
 		};
 		cpu.log("Created");
 		return cpu;
@@ -69,20 +66,25 @@ impl Cpu {
 			self.NV_BDIZC &= !Self::ZERO_FLAG;
 		}
 	}
-	
 	fn set_negative(&mut self, n: u8) {
-		if n & 0x80 != 0 {
+		if n & 0b10000000 != 0 {
 			self.NV_BDIZC |= Self::NEGATIVE_FLAG;
 		} else {
 			self.NV_BDIZC &= !Self::NEGATIVE_FLAG;
 		}
 	}
-	
 	fn set_carry(&mut self, c: bool) {
 		if c {
 			self.NV_BDIZC |= Self::CARRY_FLAG;
 		} else {
 			self.NV_BDIZC &= !Self::CARRY_FLAG;
+		}
+	}
+	fn set_overflow(&mut self, n: u8) {
+		if (self.A ^ n) & 0b10000000 != 0 {
+			self.NV_BDIZC |= Self::OVERFLOW_FLAG;
+		} else {
+			self.NV_BDIZC &= !Self::OVERFLOW_FLAG;
 		}
 	}
 	
@@ -112,15 +114,11 @@ impl Cpu {
 				}
 				Opcode::ADCa(i, ii) => {
 					let b: u8 = self.memory.get(Self::little_endian_to_u16(i, ii));
-					let result = self.A.wrapping_add(b).wrapping_add(if self.NV_BDIZC & Self::CARRY_FLAG != 0 { 1 } else { 0 });
+					let (result, overflow) = self.A.overflowing_add(b);
 					self.set_zero(result);
 					self.set_negative(result);
-					self.set_carry(result < self.A);
-					if (self.A ^ b) & 0x80 == 0 && (self.A ^ result) & 0x80 != 0 {
-						self.NV_BDIZC |= Self::OVERFLOW_FLAG;
-					} else {
-						self.NV_BDIZC &= !Self::OVERFLOW_FLAG;
-					}
+					self.set_carry(overflow);
+					self.set_overflow(b);
 					self.A = result;
 				}
 				Opcode::LDXi(i) => {
@@ -172,46 +170,23 @@ impl Cpu {
 				Opcode::SYS => {
 					match self.X {
 						0x01 => {print!("{}", self.Y);}
-						0x02 => {print!("{}", self.Y as char);}
+						0x02 => {
+							//TODO this is supposed to print the character stored at the ADDRESS in the Y register
+							//Is the address zero-page or relative?
+							print!("{}", self.Y as char);
+						}
 						0x03 => {
-							let &[i, ii] = &[self.fetch(), self.fetch()];
-							self.memory.set_range(0x00, &[i, ii]);
-							let curr_addr: (u8, u8) = Self::u16_to_little_endian(&self.PC);
-							self.memory.set_range(0x0100 + self.S as u16, &[curr_addr.0, curr_addr.1]);
-							self.S -= 2;
-							self.PC = PRINT_STR_ADDR;
+							let mut address: u16 = Self::little_endian_to_u16(self.fetch(), self.fetch());
+							let mut string: String = String::from("");
+							while self.memory.get(address) != 0x00 {
+								string.push(self.memory.get(address) as char);
+								address += 1;
+							}
+							print!("{}", string);
 						}
 						_ => {}
 					}
 				}
-				
-				Opcode::JSRa(i, ii) => {
-					let curr_addr: (u8, u8) = Self::u16_to_little_endian(&self.PC);
-					self.memory.set_range(0x0100 + self.S as u16, &[curr_addr.0, curr_addr.1]);
-					self.S -= 2;
-					self.PC = Self::little_endian_to_u16(i, ii);
-				}
-				Opcode::RTS => {
-					self.S += 2;
-					let addr: &[u8] = self.memory.get_range(0x0100 + self.S as u16, 2);
-					self.PC = Self::little_endian_to_u16(addr[0], addr[1]);
-				}
-				Opcode::LDAn(i) => {
-					self.A = self.memory.get(Self::little_endian_to_u16(self.memory.get(i as u16), self.memory.get(i as u16 + 1)) + self.Y as u16);
-					self.set_zero(self.A);
-					self.set_negative(self.A);
-				}
-				Opcode::BEQr(i) => {
-					if self.NV_BDIZC & Self::ZERO_FLAG != 0 {
-						self.PC += i as u16;
-					}
-				}
-				Opcode::INX => {
-					self.X += 1;
-					self.set_zero(self.X);
-					self.set_negative(self.X);
-				}
-				Opcode::JMPa(i, ii) => {self.PC = Self::little_endian_to_u16(i, ii);}
 			}
 		} else {
 			//I'll get around to handling this
@@ -222,7 +197,7 @@ impl Cpu {
 
 /**6502 ASM opcodes.
 Lowercase 4th letter indicates addressing mode.
-i = immediate, a = absolute, n = indirect.
+i = immediate, a = absolute, r = relative.
 Parameters indicate operands.*/
 #[repr(u8)]
 #[derive(Debug)]
@@ -245,13 +220,6 @@ enum Opcode {
 	BNEr(u8)        = 0xD0,     //branch if zero-flag != 0
 	INCa(u8, u8)    = 0xEE,     //increment A
 	SYS             = 0xFF,     //syscall may have operands, but that must be handled in impl Cpu::fetch_decode_execute
-	
-	JSRa(u8, u8)     = 0x20,     //jump to new address, pushing current address onto stack
-	RTS             = 0x60,     //pop the address from the top of the stack and go there
-	LDAn(u8)        = 0xB1,     //load into the accumulator the value pointed to by the address stored in the zero-page based address with the given operand, and indexed by the value in the Y register
-	BEQr(u8)         = 0xF0,     //branch if Z = 1 to the relative address
-	INX             = 0xE8,     //increment X
-	JMPa(u8, u8)     = 0x4C      //jump to the given address
 }
 
 impl Opcode {
@@ -276,13 +244,6 @@ impl Opcode {
 			0xD0 => {Some(Opcode::BNEr(cpu.fetch()))}
 			0xEE => {Some(Opcode::INCa(cpu.fetch(), cpu.fetch()))}
 			0xFF => {Some(Opcode::SYS)}
-			
-			0x20 => {Some(Opcode::JSRa(cpu.fetch(), cpu.fetch()))}
-			0x60 => {Some(Opcode::RTS)}
-			0xB1 => {Some(Opcode::LDAn(cpu.fetch()))}
-			0xF0 => {Some(Opcode::BEQr(cpu.fetch()))}
-			0xE8 => {Some(Opcode::INX)}
-			0x4C => {Some(Opcode::JMPa(cpu.fetch(), cpu.fetch()))}
 			_ => {None}//TODO print out the given opcode here and the error message
 		}
 	}
