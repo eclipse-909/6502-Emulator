@@ -1,14 +1,9 @@
-use {
-	crate::hardware::{
-		clock::Clock,
-		hardware::{Hardware, HardwareSpecs},
-		imp::clock_listener::ClockListener
-	},
-	std::{
-		thread::sleep,
-		time::Duration
-	},
+use crate::hardware::{
+	clock::Clock,
+	hardware::{Hardware, HardwareSpecs},
+	imp::clock_listener::ClockListener
 };
+use crate::hardware::cpu::Cpu;
 
 /**This program is heavily object-oriented. The program is build around the System,
 which is the top node in the hierarchy of composed objects.
@@ -47,16 +42,15 @@ impl System {
 	pub fn load_program(&mut self, address: u16, program: &[u8]) {self.clock.cpu.memory.set_range(address, program);}
 	
 	pub fn start_system(&mut self) {
-		self.clock.cpu.running = true;
 		self.clock.cpu.memory.display_memory(0x0000, 0x0014);
 		let (i, ii) = (self.clock.cpu.fetch(), self.clock.cpu.fetch());
 		self.clock.cpu.PC = Self::little_endian_to_u16(i, ii);
 		self.clock.cpu.specs.debug = false;
 		self.clock.cpu.memory.specs.debug = false;
 		loop {
-			if !self.clock.cpu.running {return;}
+			if self.clock.cpu.NV_BDIZC & Cpu::BREAK_FLAG == Cpu::BREAK_FLAG {return;}
 			self.clock.pulse();
-			sleep(Duration::from_micros(Self::CLOCK_INTERVAL_MICRO));
+			//sleep(Duration::from_micros(Self::CLOCK_INTERVAL_MICRO));
 		}
 	}
 }

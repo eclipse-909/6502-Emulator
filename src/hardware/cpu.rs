@@ -6,15 +6,14 @@ use crate::hardware::{
 
 pub struct Cpu {
 	pub specs: HardwareSpecs,
-	pub running: bool,
-	pub memory: Box<Memory>,//too big to store 0x10000 bytes of memory on the stack
+	pub memory: Memory,
 	cpu_clock_counter: u128,
 	pub PC: u16,
 	S: u8,//points to 0x0100 + S
 	A: u8,
 	X: u8,
 	Y: u8,
-	NV_BDIZC: u8
+	pub NV_BDIZC: u8
 }
 
 impl Hardware for Cpu {
@@ -23,8 +22,7 @@ impl Hardware for Cpu {
 	fn new() -> Self {
 		let cpu: Self = Self {
 			specs: HardwareSpecs::new_default("Cpu"),
-			running: false,
-			memory: Box::new(Memory::new()),
+			memory: Memory::new(),
 			cpu_clock_counter: 0,
 			PC: 0xfffc,//0xfffc and 0xfffd hold the address that the program starts at
 			S: 0xfd,//stack grows down
@@ -48,29 +46,44 @@ impl ClockListener for Cpu {
 }
 
 impl Cpu {
-	const CARRY_FLAG: u8 = 0b0000_0001;
-	const ZERO_FLAG: u8 = 0b0000_0010;
-	const OVERFLOW_FLAG: u8 = 0b0100_0000;
 	const NEGATIVE_FLAG: u8 = 0b1000_0000;
+	const OVERFLOW_FLAG: u8 = 0b0100_0000;
+	pub const BREAK_FLAG: u8 = 0b0001_0000;
+	const ZERO_FLAG: u8 = 0b0000_0010;
+	const CARRY_FLAG: u8 = 0b0000_0001;
 	
 	pub fn fetch(&mut self) -> u8 {
 		let op: u8 = self.memory.get(self.PC);
-		self.PC += 1;
+		self.PC = self.PC.wrapping_add(1);
 		return op;
 	}
 	
-	fn set_zero(&mut self, n: u8) {
-		if n == 0 {
-			self.NV_BDIZC |= Self::ZERO_FLAG;
-		} else {
-			self.NV_BDIZC &= !Self::ZERO_FLAG;
-		}
-	}
 	fn set_negative(&mut self, n: u8) {
 		if n & 0b10000000 != 0 {
 			self.NV_BDIZC |= Self::NEGATIVE_FLAG;
 		} else {
 			self.NV_BDIZC &= !Self::NEGATIVE_FLAG;
+		}
+	}
+	fn set_overflow(&mut self, v: bool) {
+		if v {
+			self.NV_BDIZC |= Self::OVERFLOW_FLAG;
+		} else {
+			self.NV_BDIZC &= !Self::OVERFLOW_FLAG;
+		}
+	}
+	fn set_break(&mut self, set: bool) {
+		if set {
+			self.NV_BDIZC |= Self::BREAK_FLAG;
+		} else {
+			self.NV_BDIZC &= !Self::BREAK_FLAG;
+		}
+	}
+	fn set_zero(&mut self, n: u8) {
+		if n == 0 {
+			self.NV_BDIZC |= Self::ZERO_FLAG;
+		} else {
+			self.NV_BDIZC &= !Self::ZERO_FLAG;
 		}
 	}
 	fn set_carry(&mut self, c: bool) {
@@ -80,14 +93,8 @@ impl Cpu {
 			self.NV_BDIZC &= !Self::CARRY_FLAG;
 		}
 	}
-	fn set_overflow(&mut self, n: u8) {
-		if (self.A ^ n) & 0b10000000 != 0 {
-			self.NV_BDIZC |= Self::OVERFLOW_FLAG;
-		} else {
-			self.NV_BDIZC &= !Self::OVERFLOW_FLAG;
-		}
-	}
 	
+	//TODO go through all the instructions and check how they should update the status register
 	fn fetch_decode_execute(&mut self) {
 		if let Some(opcode) = Opcode::fetch_decode(self) {
 			match opcode {
@@ -117,8 +124,8 @@ impl Cpu {
 					let (result, overflow) = self.A.overflowing_add(b);
 					self.set_zero(result);
 					self.set_negative(result);
-					self.set_carry(overflow);
-					self.set_overflow(b);
+					self.set_carry(result <= self.A && b != 0);
+					self.set_overflow(overflow);
 					self.A = result;
 				}
 				Opcode::LDXi(i) => {
@@ -152,35 +159,39 @@ impl Cpu {
 					self.set_negative(self.Y);
 				}
 				Opcode::NOP => {}
-				Opcode::BRK => {self.running = false; self.NV_BDIZC |= 0b1_0100;}
+				Opcode::BRK => {self.set_break(true);}
 				Opcode::CPXa(i, ii) => {
 					let value: u8 = self.memory.get(Self::little_endian_to_u16(i, ii));
-					self.set_zero(self.X);
-					self.set_negative(self.X);
+					self.set_zero(self.X.wrapping_sub(value));
+					self.set_negative(self.X.wrapping_sub(value));
 					self.set_carry(self.X >= value);
 				}
-				Opcode::BNEr(i) => {if self.NV_BDIZC & Self::ZERO_FLAG == 0 {self.PC += i as u16;}}
+				Opcode::BNEr(i) => {
+					//I'm not sure when the overflow wraps back to a previous address vs carries to the next page
+					//this implementation might night be accurate
+					//Right now it tries to perform signed addition on the program counter
+					if self.NV_BDIZC & Self::ZERO_FLAG == 0 {
+						self.PC = (self.PC as i16).wrapping_add(i as i8 as i16) as u16;
+					}
+				}
 				Opcode::INCa(i, ii) => {
 					let addr: u16 = Self::little_endian_to_u16(i, ii);
-					let value: u8 = self.memory.get(addr);
+					let mut value: u8 = self.memory.get(addr);
+					value = value.wrapping_add(1);
 					self.set_zero(value);
 					self.set_negative(value);
-					self.memory.set(addr, value + 1);
+					self.memory.set(addr, value);
 				}
 				Opcode::SYS => {
 					match self.X {
 						0x01 => {print!("{}", self.Y);}
-						0x02 => {
-							//TODO this is supposed to print the character stored at the ADDRESS in the Y register
-							//Is the address zero-page or relative?
-							print!("{}", self.Y as char);
-						}
+						0x02 => {print!("{}", self.memory.get(self.PC + self.Y as u16) as char);}
 						0x03 => {
 							let mut address: u16 = Self::little_endian_to_u16(self.fetch(), self.fetch());
 							let mut string: String = String::from("");
 							while self.memory.get(address) != 0x00 {
 								string.push(self.memory.get(address) as char);
-								address += 1;
+								address = address.wrapping_add(1);
 							}
 							print!("{}", string);
 						}
@@ -189,8 +200,8 @@ impl Cpu {
 				}
 			}
 		} else {
-			//I'll get around to handling this
-			panic!("Received an invalid opcode");
+			//The program will panic, so this will never execute
+			//panic!("Received an invalid opcode");
 		}
 	}
 }
@@ -244,7 +255,10 @@ impl Opcode {
 			0xD0 => {Some(Opcode::BNEr(cpu.fetch()))}
 			0xEE => {Some(Opcode::INCa(cpu.fetch(), cpu.fetch()))}
 			0xFF => {Some(Opcode::SYS)}
-			_ => {None}//TODO print out the given opcode here and the error message
+			_ => {
+				panic!("Received an invalid opcode 0x{:02X} at address 0x{:04X}", value, cpu.PC - 1);
+				//None  //if this returns none, it needs to be handled in the calling function, not otherwise
+			}
 		}
 	}
 }
