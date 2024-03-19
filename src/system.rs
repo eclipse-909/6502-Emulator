@@ -44,11 +44,11 @@ impl System {
 	pub fn start_system(&mut self) {
 		self.clock.cpu.memory.display_memory(0x0000, 0x0014);
 		let (i, ii) = (self.clock.cpu.fetch(), self.clock.cpu.fetch());
-		self.clock.cpu.PC = Self::little_endian_to_u16(i, ii);
+		self.clock.cpu.pc = Self::little_endian_to_u16(i, ii);
 		self.clock.cpu.specs.debug = false;
 		self.clock.cpu.memory.specs.debug = false;
 		loop {
-			if self.clock.cpu.NV_BDIZC & Cpu::BREAK_FLAG == Cpu::BREAK_FLAG {return;}
+			if self.clock.cpu.nv_bdizc & Cpu::BREAK_FLAG == Cpu::BREAK_FLAG {return;}
 			self.clock.pulse();
 			//sleep(Duration::from_micros(Self::CLOCK_INTERVAL_MICRO));
 		}

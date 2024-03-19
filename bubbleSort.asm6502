@@ -62,8 +62,8 @@ if_unequal:
 low_j1_b: +$01
 	LDY array
 ineq_loop:
-	TYA				;put array[j] in X and array[j+1] in Y
-	BNE check_x		;if Y != 0, decrement X, else swap
+	TYA				;put array[j] in x and array[j+1] in y
+	BNE check_x		;if y != 0, decrement x, else swap
 	LDA #$01
 	BNE swapping
 
@@ -78,19 +78,19 @@ check_x:
 	TXA
 	ADC decrement
 	TAX
-	BNE ineq_loop	;if X != 0, decrement Y again, else don't swap and continue
+	BNE ineq_loop	;if x != 0, decrement y again, else don't swap and continue
 	LDA #$01
 	BNE in_cont
 swapping:
 low_j_b: +$01
-	LDA array	;load array[j] into A
+	LDA array	;load array[j] into a
 low_j1_c: +$01
-	LDY array	;load array[j+1] into Y
+	LDY array	;load array[j+1] into y
 low_j1_d: +$01
-	STA array	;store A (array[j]) into array[j+1]
+	STA array	;store a (array[j]) into array[j+1]
 	TYA
 low_j_c: +$01
-	STA array	;store A (array[j+1]) into array[j]
+	STA array	;store a (array[j+1]) into array[j]
 	LDA #$01
 	STA swapped		;swapped = true
 in_cont:
