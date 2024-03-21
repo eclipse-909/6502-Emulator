@@ -1,19 +1,22 @@
 use crate::hardware::{
 	hardware::{Hardware, HardwareSpecs},
-	memory::Memory,
 	imp::clock_listener::ClockListener,
+	mmu::MMU
 };
 
 pub struct Cpu {
 	pub specs: HardwareSpecs,
-	pub memory: Memory,
-	cpu_clock_counter: u128,
+	pub mmu: MMU,
+	cpu_clock_counter: u128,//this increments after each instruction, so it's not realistic
 	pub pc: u16,
-	s: u8,//points to 0x0100 + s
+	ir: Opcode,
+	sp: u8,//points to 0x0100 + sp
 	a: u8,
 	x: u8,
 	y: u8,
-	pub nv_bdizc: u8
+	pub nv_bdizc: u8,
+	buf: u8,
+	pipeline_step: u8
 }
 
 impl Hardware for Cpu {
@@ -22,14 +25,17 @@ impl Hardware for Cpu {
 	fn new() -> Self {
 		let cpu: Self = Self {
 			specs: HardwareSpecs::new_default("Cpu"),
-			memory: Memory::new(),
+			mmu: MMU::new(),
 			cpu_clock_counter: 0,
 			pc: 0xfffc,//0xfffc and 0xfffd hold the address that the program starts at
-			s: 0xfd,//stack grows down
+			ir: Opcode::BRK,
+			sp: 0xff,//stack grows down
 			a: 0x00,
 			x: 0x00,
 			y: 0x00,
-			nv_bdizc: 0b00100000
+			nv_bdizc: 0b00100000,
+			buf: 0x00,
+			pipeline_step: 0x00
 		};
 		cpu.log("Created");
 		return cpu;
@@ -40,8 +46,243 @@ impl ClockListener for Cpu {
 	fn pulse(&mut self) {
 		self.log(format!("Received clock pulse - CPU clock count: {}", self.cpu_clock_counter).as_str());
 		self.cpu_clock_counter += 1;
-		self.fetch_decode_execute();
-		self.memory.pulse();
+		
+		//TODO decide if the cpu and memory pulses should be handled in parallel or synchronously
+		//TODO don't forget to update the status register for each instruction executed
+		match self.pipeline_step {
+			0x00 => {
+				self.mmu.memory.mar = self.pc;
+				//If the memory and cpu pulse in parallel, then I have to assume that the memory has already pulsed
+				//to prevent race conditions. The memory will be read in the next cycle.
+				self.mmu.read();
+				self.pipeline_step = 0x01;
+			}
+			0x01 => {
+				//Waiting for memory read.
+				//If the memory and cpu pulse in parallel, then I have to assume that the memory has not yet pulsed
+				//to prevent race conditions. The memory will be read by the end of this cycle.
+				self.pipeline_step = 0x02;
+			}
+			0x02 => {
+				self.ir = Opcode::from_u8(self.mmu.memory.mdr).expect(format!("Received an invalid opcode 0x{:02X} at address 0x{:04X}", self.mmu.memory.mdr, self.pc).as_str());
+				self.pc = self.pc.wrapping_add(1);
+				self.pipeline_step = 0x03;
+			}
+			0x03 => {
+				//instructions with no operand can be executed immediately here
+				//instructions with 1 or 2 operands should set the pipeline_step to be able to fetch the operand
+				match self.ir {
+					Opcode::TXA => {
+						self.a = self.x;
+						self.set_zero(self.a);
+						self.set_negative(self.a);
+						self.pipeline_step = 0x00;
+					}
+					Opcode::TYA => {
+						self.a = self.y;
+						self.set_zero(self.a);
+						self.set_negative(self.a);
+						self.pipeline_step = 0x00;
+					}
+					Opcode::TAX => {
+						self.x = self.a;
+						self.set_zero(self.x);
+						self.set_negative(self.x);
+						self.pipeline_step = 0x00;
+					}
+					Opcode::TAY => {
+						self.y = self.a;
+						self.set_zero(self.y);
+						self.set_negative(self.y);
+						self.pipeline_step = 0x00;
+					}
+					Opcode::NOP => {
+						self.pipeline_step = 0x00;
+					}
+					Opcode::BRK => {
+						//I'm pretty sure the BRK actually takes 7 cycles, but I don't feel like doing all that
+						self.set_break(true);
+						self.pipeline_step = 0x00;
+					}
+					Opcode::SYS => {
+						match self.x {
+							0x01 => {
+								//execute immediately?
+								//does this require additional cycles?
+								print!("{}", self.y);
+								self.pipeline_step = 0x00;
+							}
+							0x02 => {
+								//execute immediately?
+								//does this require additional cycles?
+								self.mmu.memory.mar = self.pc.wrapping_add(self.y as u16);
+								self.mmu.read();
+								self.pipeline_step = 0x04;
+							}
+							0x03 => {
+								//set the pipeline_step to fetch 2 operands
+								//does this require a cycle for each character?
+								self.mmu.memory.mar = self.pc;
+								self.pc = self.pc.wrapping_add(1);
+								self.mmu.read();
+								self.pipeline_step = 0x04;
+							}
+							_ => {panic!("Invalid SYS call. Wrong value in the X register.");}
+						}
+					}
+					Opcode::LDAi | Opcode::LDXi | Opcode::LDYi | Opcode::BNEr | Opcode::LDAa | Opcode::STAa | Opcode::ADCa | Opcode::LDXa | Opcode::LDYa | Opcode::CPXa | Opcode::INCa => {
+						//set the pipeline_step to fetch 1 operand
+						self.mmu.memory.mar = self.pc;
+						self.pc = self.pc.wrapping_add(1);
+						self.mmu.read();
+						self.pipeline_step = 0x04;
+					}
+				}
+			}
+			0x04 => {
+				//waiting for memory read
+				self.pipeline_step = 0x05
+			}
+			0x05 => {
+				match self.ir {
+					Opcode::LDAi => {
+						self.a = self.mmu.memory.mdr;
+						self.set_zero(self.a);
+						self.set_negative(self.a);
+						self.pipeline_step = 0x00;
+					}
+					Opcode::LDXi => {
+						self.x = self.mmu.memory.mdr;
+						self.set_zero(self.x);
+						self.set_negative(self.x);
+						self.pipeline_step = 0x00;
+					}
+					Opcode::LDYi => {
+						self.y = self.mmu.memory.mdr;
+						self.set_zero(self.y);
+						self.set_negative(self.y);
+						self.pipeline_step = 0x00;
+					}
+					Opcode::BNEr => {
+						if self.nv_bdizc & Self::ZERO_FLAG == 0 {
+							self.pc = (self.pc as i16).wrapping_add(self.mmu.memory.mdr as i8 as i16) as u16;
+						}
+						self.pipeline_step = 0x00;
+					}
+					Opcode::LDAa | Opcode::STAa | Opcode::ADCa | Opcode::LDXa | Opcode::LDYa | Opcode::CPXa | Opcode::INCa => {
+						self.buf = self.mmu.memory.mdr;
+						self.mmu.memory.mar = self.pc;
+						self.pc = self.pc.wrapping_add(1);
+						self.mmu.read();
+						self.pipeline_step = 0x06;
+					}
+					Opcode::SYS => {
+						if self.x == 3 {
+							self.buf = self.mmu.memory.mdr;
+							self.mmu.memory.mar = self.pc;
+							self.pc = self.pc.wrapping_add(1);
+							self.mmu.read();
+							self.pipeline_step = 0x06;
+						} else {
+							print!("{}", self.mmu.memory.mdr as char);
+							self.pipeline_step = 0x00;
+						}
+					}
+					_ => {panic!("This code should be unreachable.");}
+				}
+			}
+			0x06 => {
+				//waiting for memory read
+				self.pipeline_step = 0x07;
+			}
+			0x07 => {
+				self.mmu.set_mar_low(self.buf);
+				self.mmu.set_mar_high(self.mmu.memory.mdr);
+				match self.ir {
+					Opcode::LDAa | Opcode::ADCa | Opcode::LDXa | Opcode::LDYa | Opcode::CPXa | Opcode::INCa | Opcode::SYS => {
+						self.mmu.read();
+					}
+					Opcode::STAa => {
+						self.mmu.memory.mdr = self.a;
+						self.mmu.write();
+					}
+					_ => {panic!("This code should be unreachable.");}
+				}
+				self.pipeline_step = 0x08;
+			}
+			0x08 => {
+				//waiting for memory read or write
+				if self.ir == Opcode::STAa {
+					self.pipeline_step = 0x00;
+				} else {
+					self.pipeline_step = 0x09;
+				}
+			}
+			0x09 => {
+				match self.ir {
+					Opcode::LDAa => {
+						self.a = self.mmu.memory.mdr;
+						self.set_zero(self.a);
+						self.set_negative(self.a);
+						self.pipeline_step = 0x00;
+					}
+					Opcode::ADCa => {
+						let b: u8 = self.mmu.memory.mdr;
+						let (result, overflow) = self.a.overflowing_add(b);
+						self.set_zero(result);
+						self.set_negative(result);
+						self.set_carry(result <= self.a && b != 0);
+						self.set_overflow(overflow);
+						self.a = result;
+						self.pipeline_step = 0x00;
+					}
+					Opcode::LDXa => {
+						self.x = self.mmu.memory.mdr;
+						self.set_zero(self.x);
+						self.set_negative(self.x);
+						self.pipeline_step = 0x00;
+					}
+					Opcode::LDYa => {
+						self.y = self.mmu.memory.mdr;
+						self.set_zero(self.y);
+						self.set_negative(self.y);
+						self.pipeline_step = 0x00;
+					}
+					Opcode::CPXa => {
+						let value: u8 = self.mmu.memory.mdr;
+						self.set_zero(self.x.wrapping_sub(value));
+						self.set_negative(self.x.wrapping_sub(value));
+						self.set_carry(self.x >= value);
+						self.pipeline_step = 0x00;
+					}
+					Opcode::INCa => {
+						let mut value: u8 = self.mmu.memory.mdr;
+						value = value.wrapping_add(1);
+						self.set_zero(value);
+						self.set_negative(value);
+						self.mmu.memory.mdr = value;
+						self.mmu.write();
+						self.pipeline_step = 0x0A;
+					}
+					Opcode::SYS => {
+						if self.mmu.memory.mdr != 0 {
+							print!("{}", self.mmu.memory.mdr as char);
+							self.mmu.memory.mar = self.mmu.memory.mar.wrapping_add(1);
+							self.mmu.read();
+							self.pipeline_step = 0x08;
+						} else {
+							self.pipeline_step = 0x00;
+						}
+					}
+					_ => {panic!("This code should be unreachable.");}
+				}
+			}
+			0x0A => {
+				//wait for memory write
+				self.pipeline_step = 0x00;
+			}
+			_ => {panic!("This code should be unreachable.");}
+		}
 	}
 }
 
@@ -51,12 +292,6 @@ impl Cpu {
 	pub const BREAK_FLAG: u8 = 0b0001_0000;
 	const ZERO_FLAG: u8 = 0b0000_0010;
 	const CARRY_FLAG: u8 = 0b0000_0001;
-	
-	pub fn fetch(&mut self) -> u8 {
-		let op: u8 = self.memory.get(self.pc);
-		self.pc = self.pc.wrapping_add(1);
-		return op;
-	}
 	
 	fn set_negative(&mut self, n: u8) {
 		if n & 0b10000000 != 0 {
@@ -93,172 +328,57 @@ impl Cpu {
 			self.nv_bdizc &= !Self::CARRY_FLAG;
 		}
 	}
-	
-	//TODO go through all the instructions and check how they should update the status register
-	fn fetch_decode_execute(&mut self) {
-		if let Some(opcode) = Opcode::fetch_decode(self) {
-			match opcode {
-				Opcode::LDAi(i) => {
-					self.a = i;
-					self.set_zero(self.a);
-					self.set_negative(self.a);
-				}
-				Opcode::LDAa(i, ii) => {
-					self.a = self.memory.get(Self::little_endian_to_u16(i, ii));
-					self.set_zero(self.a);
-					self.set_negative(self.a);
-				}
-				Opcode::STAa(i, ii) => {self.memory.set(Self::little_endian_to_u16(i, ii), self.a);}
-				Opcode::TXA => {
-					self.a = self.x;
-					self.set_zero(self.a);
-					self.set_negative(self.a);
-				}
-				Opcode::TYA => {
-					self.a = self.y;
-					self.set_zero(self.a);
-					self.set_negative(self.a);
-				}
-				Opcode::ADCa(i, ii) => {
-					let b: u8 = self.memory.get(Self::little_endian_to_u16(i, ii));
-					let (result, overflow) = self.a.overflowing_add(b);
-					self.set_zero(result);
-					self.set_negative(result);
-					self.set_carry(result <= self.a && b != 0);
-					self.set_overflow(overflow);
-					self.a = result;
-				}
-				Opcode::LDXi(i) => {
-					self.x = i;
-					self.set_zero(self.x);
-					self.set_negative(self.x);
-				}
-				Opcode::LDXa(i, ii) => {
-					self.x = self.memory.get(Self::little_endian_to_u16(i, ii));
-					self.set_zero(self.x);
-					self.set_negative(self.x);
-				}
-				Opcode::TAX => {
-					self.x = self.a;
-					self.set_zero(self.x);
-					self.set_negative(self.x);
-				}
-				Opcode::LDYi(i) => {
-					self.y = i;
-					self.set_zero(self.y);
-					self.set_negative(self.y);
-				}
-				Opcode::LDYa(i, ii) => {
-					self.y = self.memory.get(Self::little_endian_to_u16(i, ii));
-					self.set_zero(self.y);
-					self.set_negative(self.y);
-				}
-				Opcode::TAY => {
-					self.y = self.a;
-					self.set_zero(self.y);
-					self.set_negative(self.y);
-				}
-				Opcode::NOP => {}
-				Opcode::BRK => {self.set_break(true);}
-				Opcode::CPXa(i, ii) => {
-					let value: u8 = self.memory.get(Self::little_endian_to_u16(i, ii));
-					self.set_zero(self.x.wrapping_sub(value));
-					self.set_negative(self.x.wrapping_sub(value));
-					self.set_carry(self.x >= value);
-				}
-				Opcode::BNEr(i) => {
-					//I'm not sure when the overflow wraps back to a previous address vs carries to the next page
-					//this implementation might night be accurate
-					//Right now it tries to perform signed addition on the program counter
-					if self.nv_bdizc & Self::ZERO_FLAG == 0 {
-						self.pc = (self.pc as i16).wrapping_add(i as i8 as i16) as u16;
-					}
-				}
-				Opcode::INCa(i, ii) => {
-					let addr: u16 = Self::little_endian_to_u16(i, ii);
-					let mut value: u8 = self.memory.get(addr);
-					value = value.wrapping_add(1);
-					self.set_zero(value);
-					self.set_negative(value);
-					self.memory.set(addr, value);
-				}
-				Opcode::SYS => {
-					match self.x {
-						0x01 => {print!("{}", self.y);}
-						0x02 => {print!("{}", self.memory.get(self.pc + self.y as u16) as char);}
-						0x03 => {
-							let mut address: u16 = Self::little_endian_to_u16(self.fetch(), self.fetch());
-							let mut string: String = String::from("");
-							while self.memory.get(address) != 0x00 {
-								string.push(self.memory.get(address) as char);
-								address = address.wrapping_add(1);
-							}
-							print!("{}", string);
-						}
-						_ => {}
-					}
-				}
-			}
-		} else {
-			//The program will panic, so this will never execute
-			//panic!("Received an invalid opcode");
-		}
-	}
 }
 
 /**6502 ASM opcodes.
 Lowercase 4th letter indicates addressing mode.
-i = immediate, a = absolute, r = relative.
+i = immediate, a = absolute, r = relative, none = accumulator.
 Parameters indicate operands.*/
 #[repr(u8)]
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 enum Opcode {
-	LDAi(u8)        = 0xA9,     //load immediate u8 into a
-	LDAa(u8, u8)    = 0xAD,     //load value from memory into a
-	STAa(u8, u8)    = 0x8D,     //store a into memory
-	TXA             = 0x8A,     //transfer x to a
-	TYA             = 0x98,     //transfer y to a
-	ADCa(u8, u8)    = 0x6D,     //add value from memory to a
-	LDXi(u8)        = 0xA2,     //load immediate u8 into x
-	LDXa(u8, u8)    = 0xAE,     //load value from memory into x
-	TAX             = 0xAA,     //transfer a to x
-	LDYi(u8)        = 0xA0,     //load immediate u8 into y
-	LDYa(u8, u8)    = 0xAC,     //load value from memory into y
-	TAY             = 0xA8,     //transfer a to y
-	NOP             = 0xEA,     //no operation
-	BRK             = 0x00,     //break
-	CPXa(u8, u8)    = 0xEC,     //compare x with value from memory
-	BNEr(u8)        = 0xD0,     //branch if zero-flag != 0
-	INCa(u8, u8)    = 0xEE,     //increment a
-	SYS             = 0xFF,     //syscall may have operands, but that must be handled in impl Cpu::fetch_decode_execute
+	LDAi = 0xA9,     //load immediate u8 into a
+	LDAa = 0xAD,     //load value from memory into a
+	STAa = 0x8D,     //store a into memory
+	TXA  = 0x8A,     //transfer x to a
+	TYA  = 0x98,     //transfer y to a
+	ADCa = 0x6D,     //add value from memory to a
+	LDXi = 0xA2,     //load immediate u8 into x
+	LDXa = 0xAE,     //load value from memory into x
+	TAX  = 0xAA,     //transfer a to x
+	LDYi = 0xA0,     //load immediate u8 into y
+	LDYa = 0xAC,     //load value from memory into y
+	TAY  = 0xA8,     //transfer a to y
+	NOP  = 0xEA,     //no operation
+	BRK  = 0x00,     //break
+	CPXa = 0xEC,     //compare x with value from memory
+	BNEr = 0xD0,     //branch if zero-flag != 0
+	INCa = 0xEE,     //increment a
+	SYS  = 0xFF,     //syscall may have operands
 }
 
 impl Opcode {
-	fn fetch_decode(cpu: &mut Cpu) -> Option<Opcode> {
-		let value: u8 = cpu.fetch();
-		return match value {
-			0xA9 => {Some(Opcode::LDAi(cpu.fetch()))}
-			0xAD => {Some(Opcode::LDAa(cpu.fetch(), cpu.fetch()))}
-			0x8D => {Some(Opcode::STAa(cpu.fetch(), cpu.fetch()))}
+	fn from_u8(opcode: u8) -> Option<Self> {
+		return match opcode {
+			0xA9 => {Some(Opcode::LDAi)}
+			0xAD => {Some(Opcode::LDAa)}
+			0x8D => {Some(Opcode::STAa)}
 			0x8A => {Some(Opcode::TXA)}
 			0x98 => {Some(Opcode::TYA)}
-			0x6D => {Some(Opcode::ADCa(cpu.fetch(), cpu.fetch()))}
-			0xA2 => {Some(Opcode::LDXi(cpu.fetch()))}
-			0xAE => {Some(Opcode::LDXa(cpu.fetch(), cpu.fetch()))}
+			0x6D => {Some(Opcode::ADCa)}
+			0xA2 => {Some(Opcode::LDXi)}
+			0xAE => {Some(Opcode::LDXa)}
 			0xAA => {Some(Opcode::TAX)}
-			0xA0 => {Some(Opcode::LDYi(cpu.fetch()))}
-			0xAC => {Some(Opcode::LDYa(cpu.fetch(), cpu.fetch()))}
+			0xA0 => {Some(Opcode::LDYi)}
+			0xAC => {Some(Opcode::LDYa)}
 			0xA8 => {Some(Opcode::TAY)}
 			0xEA => {Some(Opcode::NOP)}
 			0x00 => {Some(Opcode::BRK)}
-			0xEC => {Some(Opcode::CPXa(cpu.fetch(), cpu.fetch()))}
-			0xD0 => {Some(Opcode::BNEr(cpu.fetch()))}
-			0xEE => {Some(Opcode::INCa(cpu.fetch(), cpu.fetch()))}
+			0xEC => {Some(Opcode::CPXa)}
+			0xD0 => {Some(Opcode::BNEr)}
+			0xEE => {Some(Opcode::INCa)}
 			0xFF => {Some(Opcode::SYS)}
-			_ => {
-				panic!("Received an invalid opcode 0x{:02X} at address 0x{:04X}", value, cpu.pc - 1);
-				//None  //if this returns none, it needs to be handled in the calling function, not otherwise
-			}
+			_ => {None}
 		}
 	}
 }

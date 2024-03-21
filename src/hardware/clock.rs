@@ -26,6 +26,9 @@ impl Hardware for Clock {
 impl ClockListener for Clock {
 	/**Called on each clock cycle. Calls the pulse method on each listener registered.*/
 	fn pulse(&mut self) {
+		//I'm assuming these should run in parallel
+		//But they're running synchronously because I don't want to deal with multithreading right now
 		self.cpu.pulse();
+		self.cpu.mmu.memory.pulse();
 	}
 }

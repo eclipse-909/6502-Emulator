@@ -1,9 +1,9 @@
 use crate::hardware::{
 	clock::Clock,
 	hardware::{Hardware, HardwareSpecs},
-	imp::clock_listener::ClockListener
+	imp::clock_listener::ClockListener,
+	cpu::Cpu
 };
-use crate::hardware::cpu::Cpu;
 
 /**This program is heavily object-oriented. The program is build around the System,
 which is the top node in the hierarchy of composed objects.
@@ -34,21 +34,16 @@ impl System {
 	/**Loads a set of instructions into memory and tells the cpu to start there.*/
 	pub fn load_main_program(&mut self, address: u16, program: &[u8]) {
 		let le_address: (u8,u8) = Self::u16_to_little_endian(&address);
-		self.clock.cpu.memory.set_range(0xfffc, &[le_address.0, le_address.1]);
-		self.clock.cpu.memory.set_range(address, program);
+		self.clock.cpu.mmu.memory.set_range(0xfffc, &[le_address.0, le_address.1]);
+		self.clock.cpu.mmu.memory.set_range(address, program);
 	}
 	
-	/**loads a set of instructions into memory.*/
-	pub fn load_program(&mut self, address: u16, program: &[u8]) {self.clock.cpu.memory.set_range(address, program);}
-	
 	pub fn start_system(&mut self) {
-		self.clock.cpu.memory.display_memory(0x0000, 0x0014);
-		let (i, ii) = (self.clock.cpu.fetch(), self.clock.cpu.fetch());
-		self.clock.cpu.pc = Self::little_endian_to_u16(i, ii);
+		self.clock.cpu.mmu.memory.display_memory(0x0000, 0x0014);
+		self.clock.cpu.pc = 0x00;//doing it this way for now
 		self.clock.cpu.specs.debug = false;
-		self.clock.cpu.memory.specs.debug = false;
-		loop {
-			if self.clock.cpu.nv_bdizc & Cpu::BREAK_FLAG == Cpu::BREAK_FLAG {return;}
+		self.clock.cpu.mmu.memory.specs.debug = false;
+		while self.clock.cpu.nv_bdizc & Cpu::BREAK_FLAG != Cpu::BREAK_FLAG {
 			self.clock.pulse();
 			//sleep(Duration::from_micros(Self::CLOCK_INTERVAL_MICRO));
 		}
