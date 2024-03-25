@@ -7,7 +7,7 @@ use crate::hardware::{
 pub struct Cpu {
 	pub specs: HardwareSpecs,
 	pub mmu: MMU,
-	cpu_clock_counter: u128,//this increments after each instruction, so it's not realistic
+	pub cpu_clock_counter: u128,//this increments after each instruction, so it's not realistic
 	pub pc: u16,
 	ir: Opcode,
 	sp: u8,//points to 0x0100 + sp
@@ -16,7 +16,9 @@ pub struct Cpu {
 	y: u8,
 	pub nv_bdizc: u8,
 	buf: u8,
-	pipeline_step: u8
+	pipeline_step: u8,
+	mar: u16,
+	mdr: u8
 }
 
 impl Hardware for Cpu {
@@ -35,7 +37,9 @@ impl Hardware for Cpu {
 			y: 0x00,
 			nv_bdizc: 0b00100000,
 			buf: 0x00,
-			pipeline_step: 0x00
+			pipeline_step: 0x00,
+			mar: 0x0000,
+			mdr: 0x00
 		};
 		cpu.log("Created");
 		return cpu;
@@ -43,28 +47,39 @@ impl Hardware for Cpu {
 }
 
 impl ClockListener for Cpu {
+	/*TODO ask Prof. Gormanly about how his emulator sets the status register
+	A9 - Load Accumulator Immediate: Does not affect the status register.
+	AD - Load Accumulator from Memory (Absolute): Does not affect the status register.
+	8D - Store Accumulator in Memory (Absolute): Does not affect the status register.
+	8A - Transfer X to Accumulator: Updates the zero flag (Z) and the negative flag (N) based on the result.
+	98 - Transfer Y to Accumulator: Updates the zero flag (Z) and the negative flag (N) based on the result.
+	6D - Add with Carry (Absolute): Updates the zero flag (Z), negative flag (N), overflow flag (V), and carry flag (C) based on the result.
+	A2 - Load X Immediate: Updates the zero flag (Z) and the negative flag (N) based on the result.
+	AE - Load X from Memory (Absolute): Updates the zero flag (Z) and the negative flag (N) based on the result.
+	AA - Transfer Accumulator to X: Updates the zero flag (Z) and the negative flag (N) based on the result.
+	A0 - Load Y Immediate: Updates the zero flag (Z) and the negative flag (N) based on the result.
+	AC - Load Y from Memory (Absolute): Updates the zero flag (Z) and the negative flag (N) based on the result.
+	A8 - Transfer Accumulator to Y: Updates the zero flag (Z) and the negative flag (N) based on the result.
+	EA - No Operation: Does not affect the status register.
+	00 - Break: Updates the break flag (B) and the interrupt disable flag (I).
+	EC - Compare X with Memory (Absolute): Updates the zero flag (Z), negative flag (N), and carry flag (C) based on the comparison result.
+	D0 - Branch if Not Equal: Does not affect the status register.
+	EE - Increment Memory (Absolute): Updates the zero flag (Z) and the negative flag (N) based on the result.
+	*/
 	fn pulse(&mut self) {
 		self.log(format!("Received clock pulse - CPU clock count: {}", self.cpu_clock_counter).as_str());
 		self.cpu_clock_counter += 1;
-		
-		//TODO decide if the cpu and memory pulses should be handled in parallel or synchronously
-		//TODO don't forget to update the status register for each instruction executed
 		match self.pipeline_step {
 			0x00 => {
-				self.mmu.memory.mar = self.pc;
-				//If the memory and cpu pulse in parallel, then I have to assume that the memory has already pulsed
-				//to prevent race conditions. The memory will be read in the next cycle.
-				self.mmu.read();
+				self.mar = self.pc;
 				self.pipeline_step = 0x01;
 			}
 			0x01 => {
-				//Waiting for memory read.
-				//If the memory and cpu pulse in parallel, then I have to assume that the memory has not yet pulsed
-				//to prevent race conditions. The memory will be read by the end of this cycle.
+				self.mmu.memory.read(self.mar, &mut self.mdr);
 				self.pipeline_step = 0x02;
 			}
 			0x02 => {
-				self.ir = Opcode::from_u8(self.mmu.memory.mdr).expect(format!("Received an invalid opcode 0x{:02X} at address 0x{:04X}", self.mmu.memory.mdr, self.pc).as_str());
+				self.ir = Opcode::from_u8(self.mdr).expect(format!("Received an invalid opcode 0x{:02X} at address 0x{:04X}", self.mdr, self.pc).as_str());
 				self.pc = self.pc.wrapping_add(1);
 				self.pipeline_step = 0x03;
 			}
@@ -107,24 +122,16 @@ impl ClockListener for Cpu {
 					Opcode::SYS => {
 						match self.x {
 							0x01 => {
-								//execute immediately?
-								//does this require additional cycles?
 								print!("{}", self.y);
 								self.pipeline_step = 0x00;
 							}
 							0x02 => {
-								//execute immediately?
-								//does this require additional cycles?
-								self.mmu.memory.mar = self.pc.wrapping_add(self.y as u16);
-								self.mmu.read();
+								self.mar = self.pc.wrapping_add(self.y as u16);
 								self.pipeline_step = 0x04;
 							}
 							0x03 => {
-								//set the pipeline_step to fetch 2 operands
-								//does this require a cycle for each character?
-								self.mmu.memory.mar = self.pc;
+								self.mar = self.pc;
 								self.pc = self.pc.wrapping_add(1);
-								self.mmu.read();
 								self.pipeline_step = 0x04;
 							}
 							_ => {panic!("Invalid SYS call. Wrong value in the X register.");}
@@ -132,59 +139,54 @@ impl ClockListener for Cpu {
 					}
 					Opcode::LDAi | Opcode::LDXi | Opcode::LDYi | Opcode::BNEr | Opcode::LDAa | Opcode::STAa | Opcode::ADCa | Opcode::LDXa | Opcode::LDYa | Opcode::CPXa | Opcode::INCa => {
 						//set the pipeline_step to fetch 1 operand
-						self.mmu.memory.mar = self.pc;
+						self.mar = self.pc;
 						self.pc = self.pc.wrapping_add(1);
-						self.mmu.read();
 						self.pipeline_step = 0x04;
 					}
 				}
 			}
 			0x04 => {
-				//waiting for memory read
+				self.mmu.memory.read(self.mar, &mut self.mdr);
 				self.pipeline_step = 0x05
 			}
 			0x05 => {
 				match self.ir {
 					Opcode::LDAi => {
-						self.a = self.mmu.memory.mdr;
-						self.set_zero(self.a);
-						self.set_negative(self.a);
+						self.a = self.mdr;
 						self.pipeline_step = 0x00;
 					}
 					Opcode::LDXi => {
-						self.x = self.mmu.memory.mdr;
+						self.x = self.mdr;
 						self.set_zero(self.x);
 						self.set_negative(self.x);
 						self.pipeline_step = 0x00;
 					}
 					Opcode::LDYi => {
-						self.y = self.mmu.memory.mdr;
+						self.y = self.mdr;
 						self.set_zero(self.y);
 						self.set_negative(self.y);
 						self.pipeline_step = 0x00;
 					}
 					Opcode::BNEr => {
 						if self.nv_bdizc & Self::ZERO_FLAG == 0 {
-							self.pc = (self.pc as i16).wrapping_add(self.mmu.memory.mdr as i8 as i16) as u16;
+							self.pc = (self.pc as i16).wrapping_add(self.mdr as i8 as i16) as u16;
 						}
 						self.pipeline_step = 0x00;
 					}
 					Opcode::LDAa | Opcode::STAa | Opcode::ADCa | Opcode::LDXa | Opcode::LDYa | Opcode::CPXa | Opcode::INCa => {
-						self.buf = self.mmu.memory.mdr;
-						self.mmu.memory.mar = self.pc;
+						self.buf = self.mdr;
+						self.mar = self.pc;
 						self.pc = self.pc.wrapping_add(1);
-						self.mmu.read();
 						self.pipeline_step = 0x06;
 					}
 					Opcode::SYS => {
 						if self.x == 3 {
-							self.buf = self.mmu.memory.mdr;
-							self.mmu.memory.mar = self.pc;
+							self.buf = self.mdr;
+							self.mar = self.pc;
 							self.pc = self.pc.wrapping_add(1);
-							self.mmu.read();
 							self.pipeline_step = 0x06;
 						} else {
-							print!("{}", self.mmu.memory.mdr as char);
+							print!("{}", self.mdr as char);
 							self.pipeline_step = 0x00;
 						}
 					}
@@ -192,42 +194,36 @@ impl ClockListener for Cpu {
 				}
 			}
 			0x06 => {
-				//waiting for memory read
+				self.mmu.memory.read(self.mar, &mut self.mdr);
 				self.pipeline_step = 0x07;
 			}
 			0x07 => {
-				self.mmu.set_mar_low(self.buf);
-				self.mmu.set_mar_high(self.mmu.memory.mdr);
-				match self.ir {
-					Opcode::LDAa | Opcode::ADCa | Opcode::LDXa | Opcode::LDYa | Opcode::CPXa | Opcode::INCa | Opcode::SYS => {
-						self.mmu.read();
-					}
-					Opcode::STAa => {
-						self.mmu.memory.mdr = self.a;
-						self.mmu.write();
-					}
-					_ => {panic!("This code should be unreachable.");}
-				}
+				self.set_mar_low(self.buf);
+				self.set_mar_high(self.mdr);
+				if self.ir == Opcode::STAa {self.mdr = self.a;}
 				self.pipeline_step = 0x08;
 			}
 			0x08 => {
-				//waiting for memory read or write
-				if self.ir == Opcode::STAa {
-					self.pipeline_step = 0x00;
-				} else {
-					self.pipeline_step = 0x09;
+				match self.ir {
+					Opcode::LDAa | Opcode::ADCa | Opcode::LDXa | Opcode::LDYa | Opcode::CPXa | Opcode::INCa | Opcode::SYS => {
+						self.mmu.memory.read(self.mar, &mut self.mdr);
+						self.pipeline_step = 0x09;
+					}
+					Opcode::STAa => {
+						self.mmu.memory.write(self.mar, self.mdr);
+						self.pipeline_step = 0x00;
+					}
+					_ => {panic!("This code should be unreachable.");}
 				}
 			}
 			0x09 => {
 				match self.ir {
 					Opcode::LDAa => {
-						self.a = self.mmu.memory.mdr;
-						self.set_zero(self.a);
-						self.set_negative(self.a);
+						self.a = self.mdr;
 						self.pipeline_step = 0x00;
 					}
 					Opcode::ADCa => {
-						let b: u8 = self.mmu.memory.mdr;
+						let b: u8 = self.mdr;
 						let (result, overflow) = self.a.overflowing_add(b);
 						self.set_zero(result);
 						self.set_negative(result);
@@ -237,38 +233,37 @@ impl ClockListener for Cpu {
 						self.pipeline_step = 0x00;
 					}
 					Opcode::LDXa => {
-						self.x = self.mmu.memory.mdr;
+						self.x = self.mdr;
 						self.set_zero(self.x);
 						self.set_negative(self.x);
 						self.pipeline_step = 0x00;
 					}
 					Opcode::LDYa => {
-						self.y = self.mmu.memory.mdr;
+						self.y = self.mdr;
 						self.set_zero(self.y);
 						self.set_negative(self.y);
 						self.pipeline_step = 0x00;
 					}
 					Opcode::CPXa => {
-						let value: u8 = self.mmu.memory.mdr;
-						self.set_zero(self.x.wrapping_sub(value));
-						self.set_negative(self.x.wrapping_sub(value));
+						let value: u8 = self.mdr;
+						let difference: u8 = self.x.wrapping_sub(value);
+						self.set_zero(difference);
+						self.set_negative(difference);
 						self.set_carry(self.x >= value);
 						self.pipeline_step = 0x00;
 					}
 					Opcode::INCa => {
-						let mut value: u8 = self.mmu.memory.mdr;
+						let mut value: u8 = self.mdr;
 						value = value.wrapping_add(1);
 						self.set_zero(value);
 						self.set_negative(value);
-						self.mmu.memory.mdr = value;
-						self.mmu.write();
+						self.mdr = value;
 						self.pipeline_step = 0x0A;
 					}
 					Opcode::SYS => {
-						if self.mmu.memory.mdr != 0 {
-							print!("{}", self.mmu.memory.mdr as char);
-							self.mmu.memory.mar = self.mmu.memory.mar.wrapping_add(1);
-							self.mmu.read();
+						if self.mdr != 0 {
+							print!("{}", self.mdr as char);
+							self.mar = self.mar.wrapping_add(1);
 							self.pipeline_step = 0x08;
 						} else {
 							self.pipeline_step = 0x00;
@@ -278,7 +273,7 @@ impl ClockListener for Cpu {
 				}
 			}
 			0x0A => {
-				//wait for memory write
+				self.mmu.memory.write(self.mar, self.mdr);
 				self.pipeline_step = 0x00;
 			}
 			_ => {panic!("This code should be unreachable.");}
@@ -289,12 +284,17 @@ impl ClockListener for Cpu {
 impl Cpu {
 	const NEGATIVE_FLAG: u8 = 0b1000_0000;
 	const OVERFLOW_FLAG: u8 = 0b0100_0000;
-	pub const BREAK_FLAG: u8 = 0b0001_0000;
+	pub const BREAK_AND_INTERRUPT_FLAG: u8 = 0b0001_0100;
 	const ZERO_FLAG: u8 = 0b0000_0010;
 	const CARRY_FLAG: u8 = 0b0000_0001;
 	
+	/**Sets the low byte of the MAR.*/
+	pub fn set_mar_low(&mut self, low_byte: u8) {self.mar = (self.mar & 0xFF00) | (low_byte as u16);}
+	/**Sets the high byte of the MAR.*/
+	pub fn set_mar_high(&mut self, high_byte: u8) {self.mar = (self.mar & 0x00FF) | ((high_byte as u16) << 8);}
+	
 	fn set_negative(&mut self, n: u8) {
-		if n & 0b10000000 != 0 {
+		if n & Self::NEGATIVE_FLAG == Self::NEGATIVE_FLAG {
 			self.nv_bdizc |= Self::NEGATIVE_FLAG;
 		} else {
 			self.nv_bdizc &= !Self::NEGATIVE_FLAG;
@@ -309,9 +309,9 @@ impl Cpu {
 	}
 	fn set_break(&mut self, set: bool) {
 		if set {
-			self.nv_bdizc |= Self::BREAK_FLAG;
+			self.nv_bdizc |= Self::BREAK_AND_INTERRUPT_FLAG;
 		} else {
-			self.nv_bdizc &= !Self::BREAK_FLAG;
+			self.nv_bdizc &= !Self::BREAK_AND_INTERRUPT_FLAG;
 		}
 	}
 	fn set_zero(&mut self, n: u8) {
