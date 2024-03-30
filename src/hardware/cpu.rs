@@ -1,7 +1,11 @@
-use crate::hardware::{
-	hardware::{Hardware, HardwareSpecs},
-	imp::clock_listener::ClockListener,
-	mmu::MMU
+use {
+	crate::hardware::{
+		hardware::{Hardware, HardwareSpecs},
+		imp::clock_listener::ClockListener,
+		mmu::MMU,
+		memory::Action
+	},
+	std::sync::mpsc::{Receiver, Sender}
 };
 
 pub struct Cpu {
@@ -16,66 +20,32 @@ pub struct Cpu {
 	y: u8,
 	pub nv_bdizc: u8,
 	buf: u8,
-	pipeline_step: u8,
-	mar: u16,
-	mdr: u8
+	pub pipeline_step: u8,
+	pub mar: u16,
+	pub mdr: u8
 }
 
 impl Hardware for Cpu {
 	fn get_specs(&self) -> &HardwareSpecs {return &self.specs;}
-	
-	fn new() -> Self {
-		let cpu: Self = Self {
-			specs: HardwareSpecs::new_default("Cpu"),
-			mmu: MMU::new(),
-			cpu_clock_counter: 0,
-			pc: 0xfffc,//0xfffc and 0xfffd hold the address that the program starts at
-			ir: Opcode::BRK,
-			sp: 0xff,//stack grows down
-			a: 0x00,
-			x: 0x00,
-			y: 0x00,
-			nv_bdizc: 0b00100000,
-			buf: 0x00,
-			pipeline_step: 0x00,
-			mar: 0x0000,
-			mdr: 0x00
-		};
-		cpu.log("Created");
-		return cpu;
-	}
 }
 
 impl ClockListener for Cpu {
-	/*TODO ask Prof. Gormanly about how his emulator sets the status register
-	A9 - Load Accumulator Immediate: Does not affect the status register.
-	AD - Load Accumulator from Memory (Absolute): Does not affect the status register.
-	8D - Store Accumulator in Memory (Absolute): Does not affect the status register.
-	8A - Transfer X to Accumulator: Updates the zero flag (Z) and the negative flag (N) based on the result.
-	98 - Transfer Y to Accumulator: Updates the zero flag (Z) and the negative flag (N) based on the result.
-	6D - Add with Carry (Absolute): Updates the zero flag (Z), negative flag (N), overflow flag (V), and carry flag (C) based on the result.
-	A2 - Load X Immediate: Updates the zero flag (Z) and the negative flag (N) based on the result.
-	AE - Load X from Memory (Absolute): Updates the zero flag (Z) and the negative flag (N) based on the result.
-	AA - Transfer Accumulator to X: Updates the zero flag (Z) and the negative flag (N) based on the result.
-	A0 - Load Y Immediate: Updates the zero flag (Z) and the negative flag (N) based on the result.
-	AC - Load Y from Memory (Absolute): Updates the zero flag (Z) and the negative flag (N) based on the result.
-	A8 - Transfer Accumulator to Y: Updates the zero flag (Z) and the negative flag (N) based on the result.
-	EA - No Operation: Does not affect the status register.
-	00 - Break: Updates the break flag (B) and the interrupt disable flag (I).
-	EC - Compare X with Memory (Absolute): Updates the zero flag (Z), negative flag (N), and carry flag (C) based on the comparison result.
-	D0 - Branch if Not Equal: Does not affect the status register.
-	EE - Increment Memory (Absolute): Updates the zero flag (Z) and the negative flag (N) based on the result.
-	*/
 	fn pulse(&mut self) {
 		self.log(format!("Received clock pulse - CPU clock count: {}", self.cpu_clock_counter).as_str());
+		//See if the memory finished performing a read
+		match self.mmu.rx.try_recv() {
+			Ok(mdr) => {self.mdr = mdr;}
+			_ => {}
+		}
 		self.cpu_clock_counter += 1;
 		match self.pipeline_step {
 			0x00 => {
 				self.mar = self.pc;
 				self.pipeline_step = 0x01;
+				self.mmu.read(self.mar);
 			}
 			0x01 => {
-				self.mmu.memory.read(self.mar, &mut self.mdr);
+				//waiting for read
 				self.pipeline_step = 0x02;
 			}
 			0x02 => {
@@ -115,7 +85,7 @@ impl ClockListener for Cpu {
 						self.pipeline_step = 0x00;
 					}
 					Opcode::BRK => {
-						//I'm pretty sure the BRK actually takes 7 cycles, but I don't feel like doing all that
+						//I'm pretty sure the BRK actually takes 7 cycles because it messes with the stack
 						self.set_break(true);
 						self.pipeline_step = 0x00;
 					}
@@ -128,11 +98,13 @@ impl ClockListener for Cpu {
 							0x02 => {
 								self.mar = self.pc.wrapping_add(self.y as u16);
 								self.pipeline_step = 0x04;
+								self.mmu.read(self.mar);
 							}
 							0x03 => {
 								self.mar = self.pc;
 								self.pc = self.pc.wrapping_add(1);
 								self.pipeline_step = 0x04;
+								self.mmu.read(self.mar);
 							}
 							_ => {panic!("Invalid SYS call. Wrong value in the X register.");}
 						}
@@ -142,17 +114,20 @@ impl ClockListener for Cpu {
 						self.mar = self.pc;
 						self.pc = self.pc.wrapping_add(1);
 						self.pipeline_step = 0x04;
+						self.mmu.read(self.mar);
 					}
 				}
 			}
 			0x04 => {
-				self.mmu.memory.read(self.mar, &mut self.mdr);
+				//waiting for read
 				self.pipeline_step = 0x05
 			}
 			0x05 => {
 				match self.ir {
 					Opcode::LDAi => {
 						self.a = self.mdr;
+						self.set_zero(self.a);
+						self.set_negative(self.a);
 						self.pipeline_step = 0x00;
 					}
 					Opcode::LDXi => {
@@ -178,6 +153,7 @@ impl ClockListener for Cpu {
 						self.mar = self.pc;
 						self.pc = self.pc.wrapping_add(1);
 						self.pipeline_step = 0x06;
+						self.mmu.read(self.mar);
 					}
 					Opcode::SYS => {
 						if self.x == 3 {
@@ -185,6 +161,7 @@ impl ClockListener for Cpu {
 							self.mar = self.pc;
 							self.pc = self.pc.wrapping_add(1);
 							self.pipeline_step = 0x06;
+							self.mmu.read(self.mar);
 						} else {
 							print!("{}", self.mdr as char);
 							self.pipeline_step = 0x00;
@@ -194,7 +171,7 @@ impl ClockListener for Cpu {
 				}
 			}
 			0x06 => {
-				self.mmu.memory.read(self.mar, &mut self.mdr);
+				//waiting for read
 				self.pipeline_step = 0x07;
 			}
 			0x07 => {
@@ -202,15 +179,24 @@ impl ClockListener for Cpu {
 				self.set_mar_high(self.mdr);
 				if self.ir == Opcode::STAa {self.mdr = self.a;}
 				self.pipeline_step = 0x08;
+				match self.ir {
+					Opcode::LDAa | Opcode::ADCa | Opcode::LDXa | Opcode::LDYa | Opcode::CPXa | Opcode::INCa | Opcode::SYS => {
+						self.mmu.read(self.mar);
+					}
+					Opcode::STAa => {
+						self.mmu.write(self.mar, self.mdr);
+					}
+					_ => {panic!("This code should be unreachable.");}
+				}
 			}
 			0x08 => {
 				match self.ir {
 					Opcode::LDAa | Opcode::ADCa | Opcode::LDXa | Opcode::LDYa | Opcode::CPXa | Opcode::INCa | Opcode::SYS => {
-						self.mmu.memory.read(self.mar, &mut self.mdr);
+						//waiting for read
 						self.pipeline_step = 0x09;
 					}
 					Opcode::STAa => {
-						self.mmu.memory.write(self.mar, self.mdr);
+						//waiting for write
 						self.pipeline_step = 0x00;
 					}
 					_ => {panic!("This code should be unreachable.");}
@@ -220,6 +206,8 @@ impl ClockListener for Cpu {
 				match self.ir {
 					Opcode::LDAa => {
 						self.a = self.mdr;
+						self.set_zero(self.a);
+						self.set_negative(self.a);
 						self.pipeline_step = 0x00;
 					}
 					Opcode::ADCa => {
@@ -259,12 +247,14 @@ impl ClockListener for Cpu {
 						self.set_negative(value);
 						self.mdr = value;
 						self.pipeline_step = 0x0A;
+						self.mmu.write(self.mar, self.mdr);
 					}
 					Opcode::SYS => {
 						if self.mdr != 0 {
 							print!("{}", self.mdr as char);
 							self.mar = self.mar.wrapping_add(1);
 							self.pipeline_step = 0x08;
+							self.mmu.read(self.mar);
 						} else {
 							self.pipeline_step = 0x00;
 						}
@@ -273,7 +263,8 @@ impl ClockListener for Cpu {
 				}
 			}
 			0x0A => {
-				self.mmu.memory.write(self.mar, self.mdr);
+				//TODO check interrupt flag
+				//waiting for write
 				self.pipeline_step = 0x00;
 			}
 			_ => {panic!("This code should be unreachable.");}
@@ -287,6 +278,28 @@ impl Cpu {
 	pub const BREAK_AND_INTERRUPT_FLAG: u8 = 0b0001_0100;
 	const ZERO_FLAG: u8 = 0b0000_0010;
 	const CARRY_FLAG: u8 = 0b0000_0001;
+	
+	pub fn new(tx: Sender<(u16, u8, Action)>, rx: Receiver<u8>) -> Self {
+		let cpu: Self = Self {
+			specs: HardwareSpecs::new("Cpu"),
+			mmu: MMU::new(tx, rx),
+			cpu_clock_counter: 0,
+			pc: 0xfffc,//0xfffc and 0xfffd hold the address that the program starts at
+			ir: Opcode::BRK,
+			sp: 0xff,//stack grows down
+			a: 0x00,
+			x: 0x00,
+			y: 0x00,
+			nv_bdizc: 0b00100000,
+			buf: 0x00,
+			pipeline_step: 0x00,
+			mar: 0x0000,
+			mdr: 0x00
+		};
+		//cpu.mmu.memory.set_references(&mut cpu.mar, &mut cpu.mdr, &cpu.pipeline_step);
+		cpu.log("Created");
+		return cpu;
+	}
 	
 	/**Sets the low byte of the MAR.*/
 	pub fn set_mar_low(&mut self, low_byte: u8) {self.mar = (self.mar & 0xFF00) | (low_byte as u16);}

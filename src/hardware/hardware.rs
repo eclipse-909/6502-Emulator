@@ -10,7 +10,7 @@ static mut START_TIME: Option<Instant> = None;
 
 impl HardwareSpecs {
 	/**Creates a new instance of HardwareSpecs. Defaults id to 0 and debug to true.*/
-	pub fn new_default(name: &str) -> Self {
+	pub fn new(name: &str) -> Self {
 		return Self {
 			id: 0,
 			name: String::from(name),
@@ -21,9 +21,6 @@ impl HardwareSpecs {
 
 pub trait Hardware {
 	fn get_specs(&self) -> &HardwareSpecs;
-	
-	/**Creates a new instance and outputs "Created" to the log.*/
-	fn new() -> Self;
 	
 	/**Gets the elapsed ms since the program started.*/
 	fn elapsed_ms() -> u128 {
@@ -42,7 +39,7 @@ pub trait Hardware {
 	
 	fn u16_to_little_endian(value: &u16) -> (u8, u8) {
 		let byte1: u8 = (value & 0xFF) as u8;
-		let byte2: u8 = ((value >> 8) & 0xFF) as u8;
+		let byte2: u8 = ((value >> 8) & 0xFFu16) as u8;
 		return (byte1, byte2);
 	}
 	

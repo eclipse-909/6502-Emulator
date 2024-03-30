@@ -1,34 +1,44 @@
-use crate::hardware::{
-	hardware::{Hardware, HardwareSpecs},
-	imp::clock_listener::ClockListener,
-	cpu::Cpu
+use {
+	crate::hardware::{
+		cpu::Cpu,
+		hardware::{Hardware, HardwareSpecs},
+		imp::clock_listener::ClockListener,
+		memory::{Memory, Action}
+	},
+	std::sync::mpsc
 };
 
 pub struct Clock {
 	specs: HardwareSpecs,
-	pub cpu: Cpu
+	pub cpu: Cpu,
+	pub memory: Memory
 }
 
 impl Hardware for Clock {
 	fn get_specs(&self) -> &HardwareSpecs {return &self.specs;}
-	
-	/**Creates a new instance and outputs "Created" to the log. The registered listeners = None.*/
-	fn new() -> Self {
-		let clock: Self = Self {
-			specs: HardwareSpecs::new_default("Clock"),
-			cpu: Cpu::new()
-		};
-		clock.log("Created");
-		return clock;
-	}
 }
 
 impl ClockListener for Clock {
-	/**Called on each clock cycle. Calls the pulse method on each listener registered.*/
 	fn pulse(&mut self) {
-		//I'm assuming these should run in parallel
-		//But they're running synchronously because I don't want to deal with multithreading right now
+		//These should technically pulse in parallel
+		//If I spawn 2 threads to run these, it should work
+		//CPU and Memory use mpsc Sender and Receiver to communicate with each other thread-safely
 		self.cpu.pulse();
-		self.cpu.mmu.memory.pulse();
+		self.memory.pulse();
+	}
+}
+
+impl Clock {
+	/**Creates a new instance and outputs "Created" to the log. The registered listeners = None.*/
+	pub fn new() -> Self {
+		let (cpu_tx, mem_rx) = mpsc::channel::<(u16, u8, Action)>();
+		let (mem_tx, cpu_rx) = mpsc::channel::<u8>();
+		let mut clock: Self = Self {
+			specs: HardwareSpecs::new("Clock"),
+			cpu: Cpu::new(cpu_tx, cpu_rx),
+			memory: Memory::new(mem_tx, mem_rx)
+		};
+		clock.log("Created");
+		return clock;
 	}
 }

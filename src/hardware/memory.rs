@@ -1,45 +1,58 @@
-use crate::hardware::{
-	hardware::{Hardware, HardwareSpecs},
-	imp::clock_listener::ClockListener
+use {
+	crate::hardware::{
+		hardware::{Hardware, HardwareSpecs},
+		imp::clock_listener::ClockListener
+	},
+	std::sync::mpsc::{Receiver, Sender}
 };
 
 /**Contains 0x10000 memory addresses in RAM.*/
 pub struct Memory {
 	pub specs: HardwareSpecs,
+	//represents bus lines
+	tx: Sender<u8>,//mdr
+	rx: Receiver<(u16, u8, Action)>,//(mar, mdr, action)
 	ram: Box<[u8; 0x10000]>//unique_ptr because it's too big for the stack
 }
 
+#[repr(u8)]
+pub enum Action {None, Read, Write}
+
 impl Hardware for Memory {
 	fn get_specs(&self) -> &HardwareSpecs {return &self.specs;}
-	
-	fn new() -> Self {
+}
+
+impl ClockListener for Memory {
+	fn pulse(&mut self) {
+		self.log("Received clock pulse");
+		//see if the cpu requested a read or write
+		match self.rx.try_recv() {
+			Ok((mar, _, Action::Read)) => {
+				self.tx.send(self.ram[mar as usize]).expect("Error sending memory data to MDR.");
+			}
+			Ok((mar, mdr, Action::Write)) => {
+				self.ram[mar as usize] = mdr;
+			}
+			_ => {}
+		}
+	}
+}
+
+impl Memory {
+	pub fn new(tx: Sender<u8>, rx: Receiver<(u16, u8, Action)>) -> Self {
 		let memory: Self = Self {
-			specs: HardwareSpecs::new_default("Memory"),
+			specs: HardwareSpecs::new("Memory"),
+			tx,
+			rx,
 			ram: Box::new([0x00; 0x10000])
 		};
 		memory.log("Created - Addressable space: 0 - 65535");
 		return memory;
 	}
-}
-
-impl ClockListener for Memory {
-	//I'm not really sure what purpose this will serve, but I'll refactor my get, set, and set_range functions if I need to
-	fn pulse(&mut self) {
-		self.log("Received clock pulse");
-	}
-}
-
-impl Memory {
+	
 	fn reset(&mut self) {
 		self.ram = Box::new([0x00; 0x10000]);
 	}
-	
-	//TODO change read and write so it works on its own cycle in parallel with the CPU
-	/**Reads the value at the address of the MAR and stores it into the MDR.*/
-	pub fn read(&mut self, mar: u16, mdr: &mut u8) {*mdr = self.ram[mar as usize];}
-	/**Writes the value in the MDR into the address the MAR.*/
-	pub fn write(&mut self, mar: u16, mdr: u8) {self.ram[mar as usize] = mdr;}
-	
 	
 	//TODO refactor these functions for Lab 03 Milestone II
 	/**Displays the hex values at each memory address in the range first..=last.*/

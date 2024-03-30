@@ -1,8 +1,6 @@
 	.ORG $0000
 
-		;Print out the initial value of the array
-
-	LDX #$03
+	LDX #$03				;Print out the initial value of the array
 	SYS init_array_dscr
 	LDA array_size
 init_print_loop:
@@ -15,18 +13,29 @@ init_index: +$01
 	INC init_index
 	ADC decrement
 	BNE init_print_loop
-
-		;Bubble sort the array
-
-	LDA array_size
+	LDA array_size			;Bubble sort the array
 	ADC decrement
 	STA n	;initialize n with array_size - 1
 outer:
 	LDX n
 	CPX i
 	BNE outer_body	;if i != n, jump to body, else skip body
-	LDA #$01
-	BNE chain_sorted	;sorted is too far so I have to chain branch
+	LDX #$03
+sorted:				;else, print the sorted array
+	SYS sort_array_dscr
+	LDA array_size
+sort_print_loop:
+	LDX #$01
+sort_index: +$01
+	LDY array
+	SYS
+	LDX #$03
+	SYS delimiter
+	INC sort_index
+	ADC decrement
+	BNE sort_print_loop
+zero:
+	BRK
 outer_body:
 	LDA #$00
 	STA swapped		;swapped = false
@@ -37,8 +46,12 @@ inner:
 	TAX
 	CPX j
 	BNE inner_body	;if j != n + neg_i, jump to body, else skip body
-	LDA #$01
-	BNE post_inner
+post_inner:
+	LDA swapped		;if any elements were swapped in the inner loop,
+	ADC zero
+	BNE out_cont	;continue in the outer loop,
+	LDX #$03
+	BNE sorted		;else end the bubble sort
 inner_body:
 	LDA sort_index		;set all the array "pointers"
 	ADC j			;low_j = array[j], low_j1 = array[j+1]
@@ -56,52 +69,42 @@ low_j1_a: +$01
 	CPX array	;if array[j] == array[j+1], skip the array[j] > array[j+1] check and continue in the inner body
 	BNE if_unequal
 	TAY
-	LDA #$01
+	LDX #$01
 	BNE in_cont
+
+chain_outer:	;Chain branching because addresses are too far for 1 hop
+	BNE outer
+
 if_unequal:
 low_j1_b: +$01
 	LDY array
 ineq_loop:
-	TYA				;put array[j] in x and array[j+1] in y
-	BNE check_x		;if y != 0, decrement x, else swap
+	TYA				;put array[j] in X and array[j+1] in Y
+	BNE check_x		;if Y != 0, decrement X, else swap
+swapping:
+low_j_b: +$01
+	LDA array	;load array[j] into A
+low_j1_c: +$01
+	LDY array	;load array[j+1] into Y
+low_j1_d: +$01
+	STA array	;store A (array[j]) into array[j+1]
+	TYA
+low_j_c: +$01
+	STA array	;store A (array[j+1]) into array[j]
 	LDA #$01
-	BNE swapping
-
-chain_sorted:	;Chain branching because addresses are too far for 1 hop
-	BNE sorted
-chain_outer:
-	BNE outer
-
+	STA swapped		;swapped = true
+in_cont:
+	INC j
+	BNE inner	;increment j and continue in the inner loop
 check_x:
 	ADC decrement	;decrement both registers until the first one reaches 0
 	TAY
 	TXA
 	ADC decrement
 	TAX
-	BNE ineq_loop	;if x != 0, decrement y again, else don't swap and continue
-	LDA #$01
+	BNE ineq_loop	;if X != 0, decrement Y again, else don't swap and continue
+	LDX #$01
 	BNE in_cont
-swapping:
-low_j_b: +$01
-	LDA array	;load array[j] into a
-low_j1_c: +$01
-	LDY array	;load array[j+1] into y
-low_j1_d: +$01
-	STA array	;store a (array[j]) into array[j+1]
-	TYA
-low_j_c: +$01
-	STA array	;store a (array[j+1]) into array[j]
-	LDA #$01
-	STA swapped		;swapped = true
-in_cont:
-	INC j
-	LDA #$01
-	BNE inner	;increment j and continue in the inner loop
-post_inner:
-	LDA swapped		;if any elements were swapped in the inner loop,
-	BNE out_cont	;continue in the outer loop,
-	LDA #$01
-	BNE sorted		;else end the bubble sort
 out_cont:
 	LDA neg_i
 	ADC decrement	;decrement neg_i, increment i, and branch back to outer loop
@@ -109,26 +112,7 @@ out_cont:
 	INC i
 	BNE chain_outer		;outer is too far, so I have to chain branch
 
-		;Print out the values of the sorted array
-
-sorted:
-	LDX #$03
-	SYS sort_array_dscr
-	LDA array_size
-sort_print_loop:
-	LDX #$01
-sort_index: +$01
-	LDY array
-	SYS
-	LDX #$03
-	SYS delimiter
-	INC sort_index
-	ADC decrement
-	BNE sort_print_loop
-	BRK
-
 		;Variables
-
 i:
 	DAT $00
 neg_i:
@@ -144,9 +128,9 @@ increment:
 decrement:
 	DAT $FF
 init_array_dscr:
-	DAT $496E697469616C204172726179202000	;"Initial Array  "
+	DAT $496E6974202000				;"Init  "
 sort_array_dscr:
-	DAT $20536F72746564204172726179202000	;" Sorted Array  "
+	DAT $2020536F72746564202000		;" Sorted  "
 delimiter:
 	DAT $2C2000								;", "
 array_size:
