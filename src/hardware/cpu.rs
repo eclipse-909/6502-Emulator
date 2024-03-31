@@ -2,15 +2,14 @@ use {
 	crate::hardware::{
 		hardware::{Hardware, HardwareSpecs},
 		imp::clock_listener::ClockListener,
-		mmu::MMU,
-		memory::Action
+		mmu::Mmu
 	},
 	std::sync::mpsc::{Receiver, Sender}
 };
 
 pub struct Cpu {
 	pub specs: HardwareSpecs,
-	pub mmu: MMU,
+	pub mmu: Mmu,
 	pub cpu_clock_counter: u128,//this increments after each instruction, so it's not realistic
 	pub pc: u16,
 	ir: Opcode,
@@ -19,7 +18,7 @@ pub struct Cpu {
 	x: u8,
 	y: u8,
 	pub nv_bdizc: u8,
-	buf: u8,
+	pub buf: u8,
 	pub pipeline_step: u8,
 	pub mar: u16,
 	pub mdr: u8
@@ -27,16 +26,12 @@ pub struct Cpu {
 
 impl Hardware for Cpu {
 	fn get_specs(&self) -> &HardwareSpecs {return &self.specs;}
+	fn get_specs_mut(&mut self) -> &mut HardwareSpecs {return &mut self.specs;}
 }
 
 impl ClockListener for Cpu {
 	fn pulse(&mut self) {
 		self.log(format!("Received clock pulse - CPU clock count: {}", self.cpu_clock_counter).as_str());
-		//See if the memory finished performing a read
-		match self.mmu.rx.try_recv() {
-			Ok(mdr) => {self.mdr = mdr;}
-			_ => {}
-		}
 		self.cpu_clock_counter += 1;
 		match self.pipeline_step {
 			0x00 => {
@@ -49,6 +44,7 @@ impl ClockListener for Cpu {
 				self.pipeline_step = 0x02;
 			}
 			0x02 => {
+				self.check_read_ready();
 				self.ir = Opcode::from_u8(self.mdr).expect(format!("Received an invalid opcode 0x{:02X} at address 0x{:04X}", self.mdr, self.pc).as_str());
 				self.pc = self.pc.wrapping_add(1);
 				self.pipeline_step = 0x03;
@@ -123,6 +119,7 @@ impl ClockListener for Cpu {
 				self.pipeline_step = 0x05
 			}
 			0x05 => {
+				self.check_read_ready();
 				match self.ir {
 					Opcode::LDAi => {
 						self.a = self.mdr;
@@ -175,6 +172,7 @@ impl ClockListener for Cpu {
 				self.pipeline_step = 0x07;
 			}
 			0x07 => {
+				self.check_read_ready();
 				self.set_mar_low(self.buf);
 				self.set_mar_high(self.mdr);
 				if self.ir == Opcode::STAa {self.mdr = self.a;}
@@ -203,6 +201,7 @@ impl ClockListener for Cpu {
 				}
 			}
 			0x09 => {
+				self.check_read_ready();
 				match self.ir {
 					Opcode::LDAa => {
 						self.a = self.mdr;
@@ -279,12 +278,12 @@ impl Cpu {
 	const ZERO_FLAG: u8 = 0b0000_0010;
 	const CARRY_FLAG: u8 = 0b0000_0001;
 	
-	pub fn new(tx: Sender<(u16, u8, Action)>, rx: Receiver<u8>) -> Self {
+	pub fn new(tx: Sender<(u16, u8, bool)>, rx: Receiver<u8>) -> Self {
 		let cpu: Self = Self {
 			specs: HardwareSpecs::new("Cpu"),
-			mmu: MMU::new(tx, rx),
+			mmu: Mmu::new(tx, rx),
 			cpu_clock_counter: 0,
-			pc: 0xfffc,//0xfffc and 0xfffd hold the address that the program starts at
+			pc: 0xfffc,//0xfffc/d is the reset vector
 			ir: Opcode::BRK,
 			sp: 0xff,//stack grows down
 			a: 0x00,
@@ -299,6 +298,13 @@ impl Cpu {
 		//cpu.mmu.memory.set_references(&mut cpu.mar, &mut cpu.mdr, &cpu.pipeline_step);
 		cpu.log("Created");
 		return cpu;
+	}
+	
+	pub fn check_read_ready(&mut self) {
+		match self.mmu.rx.try_recv() {
+			Ok(mdr) => {self.mdr = mdr;}
+			_ => {}
+		}
 	}
 	
 	/**Sets the low byte of the MAR.*/

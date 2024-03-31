@@ -1,12 +1,11 @@
-use std::time::Instant;
+use crate::lib;
 
+/**Metadata for Hardware objects.*/
 pub struct HardwareSpecs {
 	id: u8,
 	name: String,
 	pub debug: bool
 }
-
-static mut START_TIME: Option<Instant> = None;
 
 impl HardwareSpecs {
 	/**Creates a new instance of HardwareSpecs. Defaults id to 0 and debug to true.*/
@@ -20,32 +19,14 @@ impl HardwareSpecs {
 }
 
 pub trait Hardware {
+	/**Returns the HardwareSpecs of this object. This function exists because there's no inheritance in Rust.*/
 	fn get_specs(&self) -> &HardwareSpecs;
-	
-	/**Gets the elapsed ms since the program started.*/
-	fn elapsed_ms() -> u128 {
-		unsafe {
-			if START_TIME.is_none() {START_TIME = Some(Instant::now());}
-			return Instant::now().duration_since(START_TIME.unwrap()).as_millis();
-		}
-	}
-	
+	/**Mutable version of Self::get_specs()*/
+	fn get_specs_mut(&mut self) -> &mut HardwareSpecs;
 	/**Logs a message to the console with a specific format with hardware specs. Use this instead of println!() when printing.*/
 	fn log(&self, message: &str) {
 		if self.get_specs().debug {
-			println!("ID: {} - Name: {} - Time: {:?} - Message: {}", self.get_specs().id, self.get_specs().name, Self::elapsed_ms(), message);
+			println!("ID: {} - Name: {} - Time: {:?} - Message: {}", self.get_specs().id, self.get_specs().name, lib::elapsed_ms(), message);
 		}
-	}
-	
-	fn u16_to_little_endian(value: &u16) -> (u8, u8) {
-		let byte1: u8 = (value & 0xFF) as u8;
-		let byte2: u8 = ((value >> 8) & 0xFFu16) as u8;
-		return (byte1, byte2);
-	}
-	
-	fn little_endian_to_u16(i: u8, ii: u8) -> u16 {
-		let byte1 = i as u16;
-		let byte2 = ii as u16;
-		return byte1 | (byte2 << 8);
 	}
 }
