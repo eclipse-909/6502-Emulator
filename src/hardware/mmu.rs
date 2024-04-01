@@ -7,6 +7,9 @@ use {
 	std::sync::mpsc::{Receiver, Sender}
 };
 
+/*TODO figure out if the MMU struct is necessary for the lab
+I can put all this stuff directly in the CPU struct and it would be a little easier to maintain and less verbose
+*/
 pub struct Mmu {
 	specs: HardwareSpecs,
 	/**Represents bus lines from MMU to Memory. (mar, mdr, read = false / write = true)*/
@@ -36,7 +39,7 @@ impl Mmu {
 	/**Requests the Memory to perform a write operation on its next cycle. Should not be called on back-to-back cycles with itself or Self::read()*/
 	pub fn write(&self, mar: u16, mdr: u8) {self.tx.send((mar, mdr, true)).expect("Error sending MAR and MDR to memory unit.");}
 	
-	//TODO figure out if these functions need to be in the MMU or if they can be in Memory
+	//TODO figure out if these functions are sufficient for the lab requirements
 	/**Takes a u8 slice and flashes it into RAM. The first value in the slice is stored at start_addr.*/
 	pub fn static_load(&self, memory: &mut Memory, values: &[u8], start_addr: u16) {
 		for (i, val) in values.iter().enumerate() {
@@ -44,7 +47,7 @@ impl Mmu {
 			memory.pulse();
 		}
 	}
-	/**Logs the values at each memory address from*/
+	/**Logs the values at each memory address in the range start_addr..end_addr*/
 	pub fn memory_dump(&self, memory: &mut Memory, start_addr: u16, end_addr: u16) {
 		for i in start_addr..end_addr {
 			self.read(i);

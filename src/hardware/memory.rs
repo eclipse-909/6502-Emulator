@@ -8,12 +8,13 @@ use {
 
 /**Contains 0x10000 memory addresses in RAM.*/
 pub struct Memory {
-	pub specs: HardwareSpecs,
+	specs: HardwareSpecs,
 	/**Represents bus lines from Memory to MMU. The u8 represents the value the MDR should hold.*/
 	tx: Sender<u8>,
 	/**Represents bus lines from MMU to Memory. (mar, mdr, read = false / write = true)*/
 	rx: Receiver<(u16, u8, bool)>,
 	ram: Box<[u8; 0x10000]>//unique_ptr because it's too big for the stack
+	//TODO define ram and rom as different variables and create functions to interface them during read/write
 }
 
 impl Hardware for Memory {
@@ -30,6 +31,7 @@ impl ClockListener for Memory {
 				self.tx.send(self.ram[mar as usize]).expect("Error sending memory data to MDR.");
 			}
 			Ok((mar, mdr, true)) => {//true = write
+				//TODO check the MAR to see if it's writing to ROM
 				self.ram[mar as usize] = mdr;
 			}
 			_ => {}//no memory action needed this cycle
@@ -45,7 +47,7 @@ impl Memory {
 			rx,
 			ram: Box::new([0x00; 0x10000])
 		};
-		memory.log("Created - Addressable space: 0 - 65535");
+		memory.log("Created - Addressable space: 0x0000 - 0xFFFB");//You are still allowed to address 0xFFFC-0xFFFF, but it messes with stuff, so please don't
 		return memory;
 	}
 	

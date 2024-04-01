@@ -20,12 +20,22 @@ impl Hardware for Clock {
 }
 
 impl ClockListener for Clock {
+	/**Pulses all registered hardware components.*/
 	fn pulse(&mut self) {
 		//These should technically pulse in parallel
 		//If I spawn 2 threads to run these, it should work
 		//CPU and Memory use mpsc Sender and Receiver to communicate with each other thread-safely
 		self.cpu.pulse();
 		self.memory.pulse();
+		
+		/*//Something like this should also work
+		//use std::{thread, thread::JoinHandle};
+		let cpu_thread_handle: JoinHandle<()> = thread::spawn(|self| {self.cpu.pulse();});
+		let memory_thread_handle: JoinHandle<()> = thread::spawn(|self| {self.memory.pulse();});
+		cpu_thread_handle.join().expect("Failed to join CPU pulse thread.");
+		memory_thread_handle.join().expect("Failed to join Memory pulse thread.");
+		*/
+		
 		//to register more hardware components, just make them components of Clock and call their pulse functions here
 	}
 }

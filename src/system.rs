@@ -22,6 +22,7 @@ impl System {
 	/**number is in microseconds or 0.001 milliseconds*/
 	const CLOCK_INTERVAL_MICRO: u64 = 1_000;//the thread.sleep command has been commented out, so there is no delay between cycles
 	
+	/**Instantiates a new System object.*/
 	pub fn new() -> Self {
 		let system: Self = Self {
 			specs: HardwareSpecs::new("System"),
@@ -40,7 +41,6 @@ impl System {
 	
 	/**Starts the system and begins processing instructions until BRK.*/
 	pub fn start(&mut self) {
-		//self.clock.memory.display_memory(0x0000, 0x0014);
 		self.clock.cpu.mmu.memory_dump(&mut self.clock.memory, 0x0000, 0x0015);
 		self.log("The delay between cycles has been disabled to speed up the program.");
 		self.read_reset_vector();

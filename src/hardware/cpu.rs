@@ -7,6 +7,7 @@ use {
 	std::sync::mpsc::{Receiver, Sender}
 };
 
+/**Just a bunch of match expressions.*/
 pub struct Cpu {
 	pub specs: HardwareSpecs,
 	pub mmu: Mmu,
