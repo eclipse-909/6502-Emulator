@@ -4,7 +4,7 @@ use {
 		imp::clock_listener::ClockListener,
 		memory::Memory
 	},
-	std::sync::mpsc::{Receiver, Sender}
+	tokio::sync::mpsc::{UnboundedSender, UnboundedReceiver}
 };
 
 /*TODO figure out if the MMU struct is necessary for the lab
@@ -13,9 +13,9 @@ I can put all this stuff directly in the CPU struct and it would be a little eas
 pub struct Mmu {
 	specs: HardwareSpecs,
 	/**Represents bus lines from MMU to Memory. (mar, mdr, read = false / write = true)*/
-	tx: Sender<(u16, u8, bool)>,
+	tx: UnboundedSender<(u16, u8, bool)>,
 	/**Represents bus lines from Memory to MMU. The u8 represents the value the MDR should hold.*/
-	pub rx: Receiver<u8>
+	pub rx: UnboundedReceiver<u8>
 }
 
 impl Hardware for Mmu {
@@ -24,7 +24,7 @@ impl Hardware for Mmu {
 }
 
 impl Mmu {
-	pub fn new(tx: Sender<(u16, u8, bool)>, rx: Receiver<u8>) -> Self {
+	pub fn new(tx: UnboundedSender<(u16, u8, bool)>, rx: UnboundedReceiver<u8>) -> Self {
 		let mmu: Self = Self {
 			specs: HardwareSpecs::new("MMU"),
 			tx,
@@ -48,7 +48,7 @@ impl Mmu {
 		}
 	}
 	/**Logs the values at each memory address in the range start_addr..end_addr*/
-	pub fn memory_dump(&self, memory: &mut Memory, start_addr: u16, end_addr: u16) {
+	pub fn memory_dump(&mut self, memory: &mut Memory, start_addr: u16, end_addr: u16) {
 		for i in start_addr..end_addr {
 			self.read(i);
 			memory.pulse();

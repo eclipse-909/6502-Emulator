@@ -3,18 +3,18 @@ use {
 		hardware::{Hardware, HardwareSpecs},
 		imp::clock_listener::ClockListener
 	},
-	std::sync::mpsc::{Receiver, Sender}
+	tokio::sync::mpsc::{UnboundedSender, UnboundedReceiver}
 };
 
 /**Contains 0x10000 memory addresses in RAM.*/
 pub struct Memory {
 	specs: HardwareSpecs,
 	/**Represents bus lines from Memory to MMU. The u8 represents the value the MDR should hold.*/
-	tx: Sender<u8>,
+	tx: UnboundedSender<u8>,
 	/**Represents bus lines from MMU to Memory. (mar, mdr, read = false / write = true)*/
-	rx: Receiver<(u16, u8, bool)>,
-	ram: Box<[u8; 0x10000]>//unique_ptr because it's too big for the stack
-	//TODO define ram and rom as different variables and create functions to interface them during read/write
+	rx: UnboundedReceiver<(u16, u8, bool)>,
+	ram: Box<[u8; 0x10000]>,//unique_ptr because it's too big for the stack
+	//TODO fix the memory so that it is NOT memory mapped. IO will be handled by passing the data through the interrupt controller.
 }
 
 impl Hardware for Memory {
@@ -31,7 +31,6 @@ impl ClockListener for Memory {
 				self.tx.send(self.ram[mar as usize]).expect("Error sending memory data to MDR.");
 			}
 			Ok((mar, mdr, true)) => {//true = write
-				//TODO check the MAR to see if it's writing to ROM
 				self.ram[mar as usize] = mdr;
 			}
 			_ => {}//no memory action needed this cycle
@@ -40,18 +39,18 @@ impl ClockListener for Memory {
 }
 
 impl Memory {
-	pub fn new(tx: Sender<u8>, rx: Receiver<(u16, u8, bool)>) -> Self {
+	pub fn new(tx: UnboundedSender<u8>, rx: UnboundedReceiver<(u16, u8, bool)>) -> Self {
 		let memory: Self = Self {
 			specs: HardwareSpecs::new("Memory"),
 			tx,
 			rx,
-			ram: Box::new([0x00; 0x10000])
+			ram: Box::new([0x00; 0x10000]),
 		};
-		memory.log("Created - Addressable space: 0x0000 - 0xFFFB");//You are still allowed to address 0xFFFC-0xFFFF, but it messes with stuff, so please don't
+		memory.log("Created - RAM: 0x0000-0xFFFF");
 		return memory;
 	}
 	
-	/**Sets addresses 0x0000..0xFFFC to 0. Keeps the values in 0xFFFC+ because it's treated as non-volatile.*/
+	/**Fills RAM (save the reset vector) with 0x00.*/
 	pub fn reset(&mut self) {
 		for i in 0x0000..0xFFFC {
 			self.ram[i] = 0x00;

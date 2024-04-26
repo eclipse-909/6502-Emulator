@@ -1,20 +1,25 @@
 use {
-	crate::hardware::{
-		hardware::{Hardware, HardwareSpecs},
-		imp::clock_listener::ClockListener,
-		mmu::Mmu
+	crate::{
+		ascii::ascii,
+		hardware::{
+			hardware::{Hardware, HardwareSpecs},
+			interrupt_controller::InterruptController,
+			imp::clock_listener::ClockListener,
+			mmu::Mmu
+		}
 	},
-	std::sync::mpsc::{Receiver, Sender}
+	tokio::sync::mpsc::{UnboundedSender, UnboundedReceiver},
+	std::io::{self, Write}
 };
 
 /**Just a bunch of match expressions.*/
 pub struct Cpu {
 	pub specs: HardwareSpecs,
+	interrupt_controller: InterruptController,
 	pub mmu: Mmu,
 	pub cpu_clock_counter: u128,//this increments after each instruction, so it's not realistic
 	pub pc: u16,
 	ir: Opcode,
-	sp: u8,//points to 0x0100 + sp
 	a: u8,
 	x: u8,
 	y: u8,
@@ -31,94 +36,86 @@ impl Hardware for Cpu {
 }
 
 impl ClockListener for Cpu {
+	/**Fetch, decode, execute, write back, and interrupt check all handled in this massive match expression.*/
 	fn pulse(&mut self) {
-		self.log(format!("Received clock pulse - CPU clock count: {}", self.cpu_clock_counter).as_str());
+		self.log(format!("CPU clock count: {}, Pipeline Step: 0x{:02X}, PC: 0x{:04X}, IR: {:?}, Acc: 0x{:02X}, X: 0x{:02X}, Y: 0x{:02X}, Status: 0b{:08b}",
+		    self.cpu_clock_counter,
+			self.pipeline_step,
+			self.pc,
+			self.ir,
+			self.a,
+			self.x,
+			self.y,
+			self.nv_bdizc
+		).as_str());
 		self.cpu_clock_counter += 1;
 		match self.pipeline_step {
-			0x00 => {
-				self.mar = self.pc;
-				self.pipeline_step = 0x01;
-				self.mmu.read(self.mar);
-			}
-			0x01 => {
-				//waiting for read
-				self.pipeline_step = 0x02;
-			}
+			0x00 => {self.fetch();}
+			0x01 => {self.pipeline_step += 1;}//waiting for read
 			0x02 => {
 				self.check_read_ready();
-				self.ir = Opcode::from_u8(self.mdr).expect(format!("Received an invalid opcode 0x{:02X} at address 0x{:04X}", self.mdr, self.pc).as_str());
-				self.pc = self.pc.wrapping_add(1);
-				self.pipeline_step = 0x03;
+				self.ir = Opcode::from(self.mdr).expect(format!("Received an invalid opcode 0x{:02X} at address 0x{:04X}", self.mdr, self.pc - 1).as_str());
+				self.pipeline_step += 1;
 			}
 			0x03 => {
 				//instructions with no operand can be executed immediately here
-				//instructions with 1 or 2 operands should set the pipeline_step to be able to fetch the operand
+				//instructions with 1 or 2 operands should set the pipeline_step to be able to fetch the operands
 				match self.ir {
 					Opcode::TXA => {
 						self.a = self.x;
 						self.set_zero(self.a);
 						self.set_negative(self.a);
-						self.pipeline_step = 0x00;
+						self.pipeline_step = 0x0A;
 					}
 					Opcode::TYA => {
 						self.a = self.y;
 						self.set_zero(self.a);
 						self.set_negative(self.a);
-						self.pipeline_step = 0x00;
+						self.pipeline_step = 0x0A;
 					}
 					Opcode::TAX => {
 						self.x = self.a;
 						self.set_zero(self.x);
 						self.set_negative(self.x);
-						self.pipeline_step = 0x00;
+						self.pipeline_step = 0x0A;
 					}
 					Opcode::TAY => {
 						self.y = self.a;
 						self.set_zero(self.y);
 						self.set_negative(self.y);
-						self.pipeline_step = 0x00;
+						self.pipeline_step = 0x0A;
 					}
 					Opcode::NOP => {
-						self.pipeline_step = 0x00;
+						self.pipeline_step = 0x0A;
 					}
 					Opcode::BRK => {
 						//I'm pretty sure the BRK actually takes 7 cycles because it messes with the stack
 						self.set_break(true);
-						self.pipeline_step = 0x00;
+						self.set_interrupt(true);//doesn't check for an interrupt at the end of this instruction cycle
+						self.pipeline_step = 0x0A;
 					}
 					Opcode::SYS => {
 						match self.x {
 							0x01 => {
 								print!("{}", self.y);
-								self.pipeline_step = 0x00;
+								io::stdout().flush().expect("Could not flush output buffer");
+								self.pipeline_step = 0x0A;
 							}
 							0x02 => {
 								self.mar = self.pc.wrapping_add(self.y as u16);
-								self.pipeline_step = 0x04;
+								self.pipeline_step += 1;
 								self.mmu.read(self.mar);
 							}
-							0x03 => {
-								self.mar = self.pc;
-								self.pc = self.pc.wrapping_add(1);
-								self.pipeline_step = 0x04;
-								self.mmu.read(self.mar);
-							}
+							0x03 => {self.fetch();}
 							_ => {panic!("Invalid SYS call. Wrong value in the X register.");}
 						}
 					}
 					Opcode::LDAi | Opcode::LDXi | Opcode::LDYi | Opcode::BNEr | Opcode::LDAa | Opcode::STAa | Opcode::ADCa | Opcode::LDXa | Opcode::LDYa | Opcode::CPXa | Opcode::INCa => {
-						//set the pipeline_step to fetch 1 operand
-						self.mar = self.pc;
-						self.pc = self.pc.wrapping_add(1);
-						self.pipeline_step = 0x04;
-						self.mmu.read(self.mar);
+						self.fetch();
 					}
 				}
 			}
-			0x04 => {
-				//waiting for read
-				self.pipeline_step = 0x05
-			}
+			0x04 => {self.pipeline_step += 1;}//waiting for read
 			0x05 => {
 				self.check_read_ready();
 				match self.ir {
@@ -126,58 +123,50 @@ impl ClockListener for Cpu {
 						self.a = self.mdr;
 						self.set_zero(self.a);
 						self.set_negative(self.a);
-						self.pipeline_step = 0x00;
+						self.pipeline_step = 0x0A;
 					}
 					Opcode::LDXi => {
 						self.x = self.mdr;
 						self.set_zero(self.x);
 						self.set_negative(self.x);
-						self.pipeline_step = 0x00;
+						self.pipeline_step = 0x0A;
 					}
 					Opcode::LDYi => {
 						self.y = self.mdr;
 						self.set_zero(self.y);
 						self.set_negative(self.y);
-						self.pipeline_step = 0x00;
+						self.pipeline_step = 0x0A;
 					}
 					Opcode::BNEr => {
 						if self.nv_bdizc & Self::ZERO_FLAG == 0 {
 							self.pc = (self.pc as i16).wrapping_add(self.mdr as i8 as i16) as u16;
 						}
-						self.pipeline_step = 0x00;
+						self.pipeline_step = 0x0A;
 					}
 					Opcode::LDAa | Opcode::STAa | Opcode::ADCa | Opcode::LDXa | Opcode::LDYa | Opcode::CPXa | Opcode::INCa => {
 						self.buf = self.mdr;
-						self.mar = self.pc;
-						self.pc = self.pc.wrapping_add(1);
-						self.pipeline_step = 0x06;
-						self.mmu.read(self.mar);
+						self.fetch();
 					}
 					Opcode::SYS => {
 						if self.x == 3 {
 							self.buf = self.mdr;
-							self.mar = self.pc;
-							self.pc = self.pc.wrapping_add(1);
-							self.pipeline_step = 0x06;
-							self.mmu.read(self.mar);
+							self.fetch();
 						} else {
-							print!("{}", self.mdr as char);
-							self.pipeline_step = 0x00;
+							print!("{}", ascii::ENCODER.get(&self.mdr).unwrap_or(&'\0'));
+							io::stdout().flush().expect("Could not flush output buffer");
+							self.pipeline_step = 0x0A;
 						}
 					}
 					_ => {panic!("This code should be unreachable.");}
 				}
 			}
-			0x06 => {
-				//waiting for read
-				self.pipeline_step = 0x07;
-			}
+			0x06 => {self.pipeline_step += 1;}//waiting for read
 			0x07 => {
 				self.check_read_ready();
 				self.set_mar_low(self.buf);
 				self.set_mar_high(self.mdr);
 				if self.ir == Opcode::STAa {self.mdr = self.a;}
-				self.pipeline_step = 0x08;
+				self.pipeline_step += 1;
 				match self.ir {
 					Opcode::LDAa | Opcode::ADCa | Opcode::LDXa | Opcode::LDYa | Opcode::CPXa | Opcode::INCa | Opcode::SYS => {
 						self.mmu.read(self.mar);
@@ -192,12 +181,9 @@ impl ClockListener for Cpu {
 				match self.ir {
 					Opcode::LDAa | Opcode::ADCa | Opcode::LDXa | Opcode::LDYa | Opcode::CPXa | Opcode::INCa | Opcode::SYS => {
 						//waiting for read
-						self.pipeline_step = 0x09;
+						self.pipeline_step += 1;
 					}
-					Opcode::STAa => {
-						//waiting for write
-						self.pipeline_step = 0x00;
-					}
+					Opcode::STAa => {self.pipeline_step = 0x0A;}//waiting for read
 					_ => {panic!("This code should be unreachable.");}
 				}
 			}
@@ -208,7 +194,7 @@ impl ClockListener for Cpu {
 						self.a = self.mdr;
 						self.set_zero(self.a);
 						self.set_negative(self.a);
-						self.pipeline_step = 0x00;
+						self.pipeline_step = 0x0A;
 					}
 					Opcode::ADCa => {
 						let b: u8 = self.mdr;
@@ -218,19 +204,19 @@ impl ClockListener for Cpu {
 						self.set_carry(result <= self.a && b != 0);
 						self.set_overflow(overflow);
 						self.a = result;
-						self.pipeline_step = 0x00;
+						self.pipeline_step = 0x0A;
 					}
 					Opcode::LDXa => {
 						self.x = self.mdr;
 						self.set_zero(self.x);
 						self.set_negative(self.x);
-						self.pipeline_step = 0x00;
+						self.pipeline_step = 0x0A;
 					}
 					Opcode::LDYa => {
 						self.y = self.mdr;
 						self.set_zero(self.y);
 						self.set_negative(self.y);
-						self.pipeline_step = 0x00;
+						self.pipeline_step = 0x0A;
 					}
 					Opcode::CPXa => {
 						let value: u8 = self.mdr;
@@ -238,7 +224,7 @@ impl ClockListener for Cpu {
 						self.set_zero(difference);
 						self.set_negative(difference);
 						self.set_carry(self.x >= value);
-						self.pipeline_step = 0x00;
+						self.pipeline_step = 0x0A;
 					}
 					Opcode::INCa => {
 						let mut value: u8 = self.mdr;
@@ -246,26 +232,45 @@ impl ClockListener for Cpu {
 						self.set_zero(value);
 						self.set_negative(value);
 						self.mdr = value;
-						self.pipeline_step = 0x0A;
+						self.pipeline_step += 1;
 						self.mmu.write(self.mar, self.mdr);
 					}
 					Opcode::SYS => {
 						if self.mdr != 0 {
-							print!("{}", self.mdr as char);
+							print!("{}", ascii::ENCODER.get(&self.mdr).unwrap_or(&'\0'));
+							io::stdout().flush().expect("Could not flush output buffer");
 							self.mar = self.mar.wrapping_add(1);
 							self.pipeline_step = 0x08;
 							self.mmu.read(self.mar);
 						} else {
-							self.pipeline_step = 0x00;
+							self.pipeline_step = 0x0A;
 						}
 					}
 					_ => {panic!("This code should be unreachable.");}
 				}
 			}
 			0x0A => {
-				//TODO check interrupt flag
-				//waiting for write
+				//waiting for write and/or checking for interrupt
 				self.pipeline_step = 0x00;
+				if self.nv_bdizc & Self::INTERRUPT_FLAG == 0 {
+					let mut recv: bool = true;
+					while recv {
+						match self.interrupt_controller.io_rx.try_recv() {
+							Ok(specs) => {self.interrupt_controller.priority_queue.push(specs);}
+							Err(_) => {recv = false;}
+						}
+					}
+					if let Some(event) = self.interrupt_controller.priority_queue.pop() {
+						if let Some(interrupt) = self.interrupt_controller.io_devices.get(&event.iqr) {
+							if let Some(c) = ascii::ENCODER.get(&interrupt.get_out_buf()) {
+								print!("{}", c);
+								io::stdout().flush().expect("Could not flush output buffer");
+							}
+						} else {
+							panic!("Could not find I/O device Name: {}, IQR: {}", event.name, event.iqr);
+						}
+					}
+				}
 			}
 			_ => {panic!("This code should be unreachable.");}
 		}
@@ -275,18 +280,19 @@ impl ClockListener for Cpu {
 impl Cpu {
 	const NEGATIVE_FLAG: u8 = 0b1000_0000;
 	const OVERFLOW_FLAG: u8 = 0b0100_0000;
-	pub const BREAK_AND_INTERRUPT_FLAG: u8 = 0b0001_0100;
+	pub const BREAK_FLAG: u8 = 0b0001_0000;
+	const INTERRUPT_FLAG: u8 = 0b0000_0100;
 	const ZERO_FLAG: u8 = 0b0000_0010;
 	const CARRY_FLAG: u8 = 0b0000_0001;
 	
-	pub fn new(tx: Sender<(u16, u8, bool)>, rx: Receiver<u8>) -> Self {
+	pub fn new(mem_tx: UnboundedSender<(u16, u8, bool)>, mem_rx: UnboundedReceiver<u8>) -> Self {
 		let cpu: Self = Self {
 			specs: HardwareSpecs::new("Cpu"),
-			mmu: Mmu::new(tx, rx),
+			interrupt_controller: InterruptController::new(),
+			mmu: Mmu::new(mem_tx, mem_rx),
 			cpu_clock_counter: 0,
 			pc: 0xfffc,//0xfffc/d is the reset vector
 			ir: Opcode::BRK,
-			sp: 0xff,//stack grows down
 			a: 0x00,
 			x: 0x00,
 			y: 0x00,
@@ -301,11 +307,9 @@ impl Cpu {
 		return cpu;
 	}
 	
+	/**If the Memory has finished performing the read operation, this function "opens the bus lines" and sets the MDR to the value that was read. Otherwise, it does nothing.*/
 	pub fn check_read_ready(&mut self) {
-		match self.mmu.rx.try_recv() {
-			Ok(mdr) => {self.mdr = mdr;}
-			_ => {}
-		}
+		if let Ok(mdr) = self.mmu.rx.try_recv() {self.mdr = mdr;}
 	}
 	
 	/**Sets the low byte of the MAR.*/
@@ -329,9 +333,18 @@ impl Cpu {
 	}
 	fn set_break(&mut self, set: bool) {
 		if set {
-			self.nv_bdizc |= Self::BREAK_AND_INTERRUPT_FLAG;
+			self.nv_bdizc |= Self::BREAK_FLAG;
+			self.nv_bdizc &= !Self::INTERRUPT_FLAG;
 		} else {
-			self.nv_bdizc &= !Self::BREAK_AND_INTERRUPT_FLAG;
+			self.nv_bdizc &= !Self::BREAK_FLAG;
+			self.nv_bdizc |= Self::INTERRUPT_FLAG;
+		}
+	}
+	fn set_interrupt(&mut self, set: bool) {
+		if set {
+			self.nv_bdizc |= Self::INTERRUPT_FLAG;
+		} else {
+			self.nv_bdizc &= !Self::INTERRUPT_FLAG;
 		}
 	}
 	fn set_zero(&mut self, n: u8) {
@@ -347,6 +360,14 @@ impl Cpu {
 		} else {
 			self.nv_bdizc &= !Self::CARRY_FLAG;
 		}
+	}
+	
+	/**Loads the PC into the MAR, increments the pipeline_step, tells the MMU to request a read operation in memory, and increments the PC.*/
+	fn fetch(&mut self) {
+		self.mar = self.pc;
+		self.pipeline_step += 1;
+		self.mmu.read(self.mar);
+		self.pc = self.pc.wrapping_add(1);
 	}
 }
 
@@ -378,7 +399,7 @@ enum Opcode {
 }
 
 impl Opcode {
-	fn from_u8(opcode: u8) -> Option<Self> {
+	fn from(opcode: u8) -> Option<Self> {
 		return match opcode {
 			0xA9 => {Some(Opcode::LDAi)}
 			0xAD => {Some(Opcode::LDAa)}

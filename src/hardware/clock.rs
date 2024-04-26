@@ -5,7 +5,7 @@ use {
 		imp::clock_listener::ClockListener,
 		memory::Memory
 	},
-	std::sync::mpsc
+	tokio::sync::mpsc::unbounded_channel
 };
 
 pub struct Clock {
@@ -28,12 +28,11 @@ impl ClockListener for Clock {
 		self.cpu.pulse();
 		self.memory.pulse();
 		
-		/*//Something like this should also work
-		//use std::{thread, thread::JoinHandle};
-		let cpu_thread_handle: JoinHandle<()> = thread::spawn(|self| {self.cpu.pulse();});
-		let memory_thread_handle: JoinHandle<()> = thread::spawn(|self| {self.memory.pulse();});
-		cpu_thread_handle.join().expect("Failed to join CPU pulse thread.");
-		memory_thread_handle.join().expect("Failed to join Memory pulse thread.");
+		/*//Something like this should also work, but idk how cpu intensive it is to spawn a thread a couple of times per cycle
+		let cpu_thread_handle: JoinHandle<()> = tokio::spawn(|self| {self.cpu.pulse();});
+		let memory_thread_handle: JoinHandle<()> = tokio::spawn(|self| {self.memory.pulse();});
+		cpu_thread_handle.await;
+		memory_thread_handle.await;
 		*/
 		
 		//to register more hardware components, just make them components of Clock and call their pulse functions here
@@ -43,8 +42,8 @@ impl ClockListener for Clock {
 impl Clock {
 	/**Creates a new instance and outputs "Created" to the log. The registered listeners = None.*/
 	pub fn new() -> Self {
-		let (cpu_tx, mem_rx) = mpsc::channel::<(u16, u8, bool)>();
-		let (mem_tx, cpu_rx) = mpsc::channel::<u8>();
+		let (cpu_tx, mem_rx) = unbounded_channel::<(u16, u8, bool)>();
+		let (mem_tx, cpu_rx) = unbounded_channel::<u8>();
 		let clock: Self = Self {
 			specs: HardwareSpecs::new("Clock"),
 			cpu: Cpu::new(cpu_tx, cpu_rx),
