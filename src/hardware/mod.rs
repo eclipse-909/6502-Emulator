@@ -6,3 +6,4 @@ pub mod imp;
 mod mmu;
 pub mod keyboard;
 pub mod interrupt_controller;
+mod cache;

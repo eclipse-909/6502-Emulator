@@ -3,14 +3,17 @@ use {
 	crate::hardware::hardware::Hardware
 };
 
-/**A type of hardware that can interrupt the CPU.*/
+///A type of hardware that can interrupt the CPU.
 pub trait Interrupt: Hardware {
+	///All devices are expected to have an output buffer register
 	fn get_out_buf(&self) -> u8;
+	///All devices are expected to have an InterruptSpecs
 	fn get_interrupt_specs(&self) -> &InterruptSpecs;
 }
 
-/**Common properties of an interrupt device.*/
-pub struct InterruptSpecs {//TODO make this impl Ord for BinaryHeap comparisons
+///Common properties of an interrupt device.
+#[derive(Clone)]
+pub struct InterruptSpecs {
 	pub iqr: u8,
 	pub priority: u8,
 	pub name: String
@@ -18,22 +21,14 @@ pub struct InterruptSpecs {//TODO make this impl Ord for BinaryHeap comparisons
 
 impl InterruptSpecs {
 	pub fn new(iqr: u8, priority: u8, name: &str) -> Self {
-		return Self {
+		Self {
 			iqr,
 			priority,
 			name: String::from(name)
-		};
-	}
-}
-impl Clone for InterruptSpecs {
-	fn clone(&self) -> Self {
-		Self {
-			iqr: self.iqr,
-			priority: self.priority,
-			name: self.name.clone()
 		}
 	}
 }
+//Traits needed for BinaryHeap comparison. All comparisons check the value of the priority and nothing else.
 impl Eq for InterruptSpecs {}
 impl PartialEq<Self> for InterruptSpecs {
 	fn eq(&self, other: &Self) -> bool {PartialEq::eq(&self.priority, &other.priority)}

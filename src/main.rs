@@ -1,7 +1,4 @@
-use crate::{
-	hardware::hardware::Hardware,
-	system::System
-};
+use crate::system::System;
 
 mod system;
 mod hardware;
@@ -11,7 +8,7 @@ mod ascii;
 async fn main() {
 	let start_address: u16 = 0x0000;
 	//Bubble-sort program, 245 bytes long
-	//I managed to get it all on the zeroth-page, but it still doesn't work in tsiram.com because it surpasses the clock cycle limit
+	//I managed to get it all on the zeroth-page, but it still doesn't work in tsiram.com because it greatly surpasses the clock cycle limit
 	let sort_program: &[u8] = &[
 		/*See bubbleSort.asm6502 to look at the assembly code I wrote to produce this array of bytes.
 		See README.md to check out the text-editor/assembler I made to assembly bubbleSort.asm6502*/
@@ -21,9 +18,10 @@ async fn main() {
 	let _ = lib::elapsed_ms();//initializes the timer to get the elapsed time
 	let mut system: System = System::new();
 	
-	system.clock.get_specs_mut().debug = false;
-	system.clock.cpu.get_specs_mut().debug = false;
-	system.clock.memory.get_specs_mut().debug = false;
+	system.clock.specs.debug = false;
+	system.clock.cpu.specs.debug = false;
+	//memory is interleaved, so you will see it used in iterators for the rest of the program
+	system.clock.memory.iter_mut().for_each(|mem| {mem.specs.debug = false;});
 	
 	system.load_main_program(start_address, sort_program);
 	system.start().await;
@@ -34,17 +32,11 @@ mod lib {
 	
 	static mut START_TIME: Option<Instant> = None;
 	
-	/**Gets the elapsed ms since the program started.*/
+	///Gets the elapsed ms since the program started.
 	pub fn elapsed_ms() -> u128 {
 		unsafe {
 			if START_TIME.is_none() {START_TIME = Some(Instant::now());}
-			return Instant::now().duration_since(START_TIME.unwrap()).as_millis();
+			Instant::now().duration_since(START_TIME.unwrap()).as_millis()
 		}
-	}
-	/**Converts a u16 to a (u8,u8) tuple in little-endian format.*/
-	pub fn u16_to_little_endian(value: u16) -> (u8, u8) {
-		let byte1: u8 = (value & 0xFF) as u8;
-		let byte2: u8 = ((value >> 8) & 0xFFu16) as u8;
-		return (byte1, byte2);
 	}
 }

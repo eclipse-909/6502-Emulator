@@ -112,7 +112,7 @@ out_cont:
 	INC i
 	BNE chain_outer		;outer is too far, so I have to chain branch
 
-		;Variables
+		;Compile-time variables 
 i:
 	DAT $00
 neg_i:
@@ -132,7 +132,7 @@ init_array_dscr:
 sort_array_dscr:
 	DAT $2020536F72746564202000		;" Sorted  "
 delimiter:
-	DAT $2C2000								;", "
+	DAT $2C2000						;", "
 array_size:
 	DAT $0A
 array:

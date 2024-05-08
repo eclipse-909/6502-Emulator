@@ -24,13 +24,12 @@ pub struct Keyboard {
 }
 
 impl Hardware for Keyboard {
-	fn get_specs(&self) -> &HardwareSpecs {return &self.hard_specs;}
-	fn get_specs_mut(&mut self) -> &mut HardwareSpecs {return &mut self.hard_specs;}
+	fn get_specs(&self) -> &HardwareSpecs {&self.hard_specs}
 }
 
 impl Interrupt for Keyboard {
-	fn get_out_buf(&self) -> u8 {return self.out_buf.load(Ordering::Relaxed);}
-	fn get_interrupt_specs(&self) -> &InterruptSpecs {return &self.int_specs;}
+	fn get_out_buf(&self) -> u8 {self.out_buf.load(Ordering::Relaxed)}
+	fn get_interrupt_specs(&self) -> &InterruptSpecs {&self.int_specs}
 }
 
 impl Keyboard {
@@ -41,8 +40,8 @@ impl Keyboard {
 			out_buf: Arc::new(AtomicU8::new(0x00))
 		};
 		keyboard.log("Created");
-		
 		//make an async task to listen for keyboard input
+		//this represents the connection between the physical keyboard and the virtual keyboard
 		let specs: InterruptSpecs = keyboard.int_specs.clone();
 		let out_buf: Arc<AtomicU8> = keyboard.out_buf.clone();
 		tokio::spawn(async move {
@@ -58,7 +57,6 @@ impl Keyboard {
 				}
 			}
 		});
-		
 		keyboard
 	}
 }

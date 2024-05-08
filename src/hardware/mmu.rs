@@ -2,64 +2,55 @@ use {
 	crate::hardware::{
 		hardware::{Hardware, HardwareSpecs},
 		imp::clock_listener::ClockListener,
-		memory::Memory
+		memory::{Memory, MemEvent, N_WAYS},
+		cache::Cache
 	},
-	tokio::sync::mpsc::{UnboundedSender, UnboundedReceiver}
+	tokio::sync::mpsc::{Sender, Receiver}
 };
 
-/*TODO figure out if the MMU struct is necessary for the lab
-I can put all this stuff directly in the CPU struct and it would be a little easier to maintain and less verbose
-*/
 pub struct Mmu {
 	specs: HardwareSpecs,
-	/**Represents bus lines from MMU to Memory. (mar, mdr, read = false / write = true)*/
-	tx: UnboundedSender<(u16, u8, bool)>,
-	/**Represents bus lines from Memory to MMU. The u8 represents the value the MDR should hold.*/
-	pub rx: UnboundedReceiver<u8>
+	pub cache: Cache
 }
 
 impl Hardware for Mmu {
-	fn get_specs(&self) -> &HardwareSpecs {return &self.specs;}
-	fn get_specs_mut(&mut self) -> &mut HardwareSpecs {return &mut self.specs;}
+	fn get_specs(&self) -> &HardwareSpecs {&self.specs}
 }
 
 impl Mmu {
-	pub fn new(tx: UnboundedSender<(u16, u8, bool)>, rx: UnboundedReceiver<u8>) -> Self {
+	pub fn new(channels: [(Sender<MemEvent>, Receiver<MemEvent>); N_WAYS as usize]) -> Self {
 		let mmu: Self = Self {
 			specs: HardwareSpecs::new("MMU"),
-			tx,
-			rx
+			cache: Cache::new(channels)
 		};
 		mmu.log("Created");
-		return mmu;
+		mmu
 	}
-	/**Requests the Memory to perform a read operation on its next cycle. To access the value that was read, use rx.recv() or rx.try_recv().
-	 Should not be called on back-to-back cycles with itself or Self::write().*/
-	pub fn read(&self, mar: u16) {self.tx.send((mar, 0, false)).expect("Error sending MAR to memory unit.");}
-	/**Requests the Memory to perform a write operation on its next cycle. Should not be called on back-to-back cycles with itself or Self::read()*/
-	pub fn write(&self, mar: u16, mdr: u8) {self.tx.send((mar, mdr, true)).expect("Error sending MAR and MDR to memory unit.");}
 	
-	//TODO figure out if these functions are sufficient for the lab requirements
-	/**Takes a u8 slice and flashes it into RAM. The first value in the slice is stored at start_addr.*/
-	pub fn static_load(&self, memory: &mut Memory, values: &[u8], start_addr: u16) {
-		for (i, val) in values.iter().enumerate() {
-			self.write(start_addr + i as u16, *val);
-			memory.pulse();
+	//Startup functions that are called before the clock starts pulsing
+	///Takes a &\[u8] and flashes it into RAM. The first value in the slice is stored at start_addr.
+	pub fn static_load(&mut self, memory: &mut [Memory; N_WAYS as usize], values: &[u8], start_addr: u16) {
+		let mut iter = values.iter().enumerate();
+		let Some((mut i, mut val)) = iter.next() else {return;};
+		loop {
+			self.cache.write(start_addr + i as u16, *val);
+			memory.iter_mut().for_each(|mem| {mem.pulse();});
+			let Some((next_i, next_val)) = iter.next() else {return;};//advance the iterator if memory action was successful
+			i = next_i;
+			val = next_val;
 		}
 	}
-	/**Logs the values at each memory address in the range start_addr..end_addr*/
-	pub fn memory_dump(&mut self, memory: &mut Memory, start_addr: u16, end_addr: u16) {
-		for i in start_addr..end_addr {
-			self.read(i);
-			memory.pulse();
-			match self.rx.try_recv() {
-				Ok(mdr) => {
-					self.log(format!("Address 0x{:04x}: | 0x{:02X}", i, mdr).as_str());
-				}
-				Err(e) => {
-					self.log(format!("Error dumping memory. Attempted to access memory at address 0x{:04x}. Error message: {e}", i).as_str());
-					return;
-				}
+	///Logs the values at each memory address in the range start_addr..end_addr
+	pub fn memory_dump(&mut self, memory: &mut [Memory; N_WAYS as usize], start_addr: u16, end_addr: u16) {
+		let mut iter = start_addr..end_addr;
+		let Some(mut i) = iter.next() else {return;};
+		loop {
+			if let Ok(Some(mdr)) = self.cache.read(i) {
+				self.log(format!("Address 0x{:04x}: | 0x{:02X}", i, mdr).as_str());
+				let Some(next) = iter.next() else {return;};//advance the iterator if memory action was successful
+				i = next;
+			} else {
+				memory.iter_mut().for_each(|mem| {mem.pulse();});//force memory to do its thing
 			}
 		}
 	}

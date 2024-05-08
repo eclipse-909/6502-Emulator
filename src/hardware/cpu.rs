@@ -5,11 +5,15 @@ use {
 			hardware::{Hardware, HardwareSpecs},
 			interrupt_controller::InterruptController,
 			imp::clock_listener::ClockListener,
-			mmu::Mmu
+			mmu::Mmu,
+			memory::{MemEvent, N_WAYS}
 		}
 	},
-	tokio::sync::mpsc::{UnboundedSender, UnboundedReceiver},
-	std::io::{self, Write}
+	tokio::sync::mpsc::{Sender, Receiver},
+	std::{
+		io::{self, Write},
+		cmp::PartialEq
+	}
 };
 
 /**Just a bunch of match expressions.*/
@@ -17,262 +21,49 @@ pub struct Cpu {
 	pub specs: HardwareSpecs,
 	interrupt_controller: InterruptController,
 	pub mmu: Mmu,
-	pub cpu_clock_counter: u128,//this increments after each instruction, so it's not realistic
+	pub cpu_clock_counter: u128,
+	pub instruction_counter: u128,
+	///Shared between fetch and decode, but execution units get their own instruction pointer
 	pub pc: u16,
-	ir: Opcode,
+	///Set to Some to let fetch and decode know if they need to run. Operands are set to Some to tell decode if the instruction is ready to be executed
+	ir: Option<(Opcode, Option<u8>, Option<u8>)>,
 	a: u8,
 	x: u8,
 	y: u8,
 	pub nv_bdizc: u8,
-	pub buf: u8,
-	pub pipeline_step: u8,
-	pub mar: u16,
-	pub mdr: u8
+	execution_units: [ExecutionUnit; 2],
+	pipe_mem_user: PipeMemUser
 }
 
 impl Hardware for Cpu {
-	fn get_specs(&self) -> &HardwareSpecs {return &self.specs;}
-	fn get_specs_mut(&mut self) -> &mut HardwareSpecs {return &mut self.specs;}
+	fn get_specs(&self) -> &HardwareSpecs {&self.specs}
 }
 
 impl ClockListener for Cpu {
 	/**Fetch, decode, execute, write back, and interrupt check all handled in this massive match expression.*/
 	fn pulse(&mut self) {
-		self.log(format!("CPU clock count: {}, Pipeline Step: 0x{:02X}, PC: 0x{:04X}, IR: {:?}, Acc: 0x{:02X}, X: 0x{:02X}, Y: 0x{:02X}, Status: 0b{:08b}",
+		self.log(format!("CPU clock count: {}, PC: 0x{:04X}, IR: {}, Acc: 0x{:02X}, X: 0x{:02X}, Y: 0x{:02X}, Status: 0b{:08b}",
 		    self.cpu_clock_counter,
-			self.pipeline_step,
 			self.pc,
-			self.ir,
+			if let Some((opcode, _, _)) = self.ir.to_owned() {format!("{:?}", opcode)} else {String::from("Empty")},
 			self.a,
 			self.x,
 			self.y,
 			self.nv_bdizc
 		).as_str());
 		self.cpu_clock_counter += 1;
-		match self.pipeline_step {
-			0x00 => {self.fetch();}
-			0x01 => {self.pipeline_step += 1;}//waiting for read
-			0x02 => {
-				self.check_read_ready();
-				self.ir = Opcode::from(self.mdr).expect(format!("Received an invalid opcode 0x{:02X} at address 0x{:04X}", self.mdr, self.pc - 1).as_str());
-				self.pipeline_step += 1;
-			}
-			0x03 => {
-				//instructions with no operand can be executed immediately here
-				//instructions with 1 or 2 operands should set the pipeline_step to be able to fetch the operands
-				match self.ir {
-					Opcode::TXA => {
-						self.a = self.x;
-						self.set_zero(self.a);
-						self.set_negative(self.a);
-						self.pipeline_step = 0x0A;
-					}
-					Opcode::TYA => {
-						self.a = self.y;
-						self.set_zero(self.a);
-						self.set_negative(self.a);
-						self.pipeline_step = 0x0A;
-					}
-					Opcode::TAX => {
-						self.x = self.a;
-						self.set_zero(self.x);
-						self.set_negative(self.x);
-						self.pipeline_step = 0x0A;
-					}
-					Opcode::TAY => {
-						self.y = self.a;
-						self.set_zero(self.y);
-						self.set_negative(self.y);
-						self.pipeline_step = 0x0A;
-					}
-					Opcode::NOP => {
-						self.pipeline_step = 0x0A;
-					}
-					Opcode::BRK => {
-						//I'm pretty sure the BRK actually takes 7 cycles because it messes with the stack
-						self.set_break(true);
-						self.set_interrupt(true);//doesn't check for an interrupt at the end of this instruction cycle
-						self.pipeline_step = 0x0A;
-					}
-					Opcode::SYS => {
-						match self.x {
-							0x01 => {
-								print!("{}", self.y);
-								io::stdout().flush().expect("Could not flush output buffer");
-								self.pipeline_step = 0x0A;
-							}
-							0x02 => {
-								self.mar = self.pc.wrapping_add(self.y as u16);
-								self.pipeline_step += 1;
-								self.mmu.read(self.mar);
-							}
-							0x03 => {self.fetch();}
-							_ => {panic!("Invalid SYS call. Wrong value in the X register.");}
-						}
-					}
-					Opcode::LDAi | Opcode::LDXi | Opcode::LDYi | Opcode::BNEr | Opcode::LDAa | Opcode::STAa | Opcode::ADCa | Opcode::LDXa | Opcode::LDYa | Opcode::CPXa | Opcode::INCa => {
-						self.fetch();
-					}
-				}
-			}
-			0x04 => {self.pipeline_step += 1;}//waiting for read
-			0x05 => {
-				self.check_read_ready();
-				match self.ir {
-					Opcode::LDAi => {
-						self.a = self.mdr;
-						self.set_zero(self.a);
-						self.set_negative(self.a);
-						self.pipeline_step = 0x0A;
-					}
-					Opcode::LDXi => {
-						self.x = self.mdr;
-						self.set_zero(self.x);
-						self.set_negative(self.x);
-						self.pipeline_step = 0x0A;
-					}
-					Opcode::LDYi => {
-						self.y = self.mdr;
-						self.set_zero(self.y);
-						self.set_negative(self.y);
-						self.pipeline_step = 0x0A;
-					}
-					Opcode::BNEr => {
-						if self.nv_bdizc & Self::ZERO_FLAG == 0 {
-							self.pc = (self.pc as i16).wrapping_add(self.mdr as i8 as i16) as u16;
-						}
-						self.pipeline_step = 0x0A;
-					}
-					Opcode::LDAa | Opcode::STAa | Opcode::ADCa | Opcode::LDXa | Opcode::LDYa | Opcode::CPXa | Opcode::INCa => {
-						self.buf = self.mdr;
-						self.fetch();
-					}
-					Opcode::SYS => {
-						if self.x == 3 {
-							self.buf = self.mdr;
-							self.fetch();
-						} else {
-							print!("{}", ascii::ENCODER.get(&self.mdr).unwrap_or(&'\0'));
-							io::stdout().flush().expect("Could not flush output buffer");
-							self.pipeline_step = 0x0A;
-						}
-					}
-					_ => {panic!("This code should be unreachable.");}
-				}
-			}
-			0x06 => {self.pipeline_step += 1;}//waiting for read
-			0x07 => {
-				self.check_read_ready();
-				self.set_mar_low(self.buf);
-				self.set_mar_high(self.mdr);
-				if self.ir == Opcode::STAa {self.mdr = self.a;}
-				self.pipeline_step += 1;
-				match self.ir {
-					Opcode::LDAa | Opcode::ADCa | Opcode::LDXa | Opcode::LDYa | Opcode::CPXa | Opcode::INCa | Opcode::SYS => {
-						self.mmu.read(self.mar);
-					}
-					Opcode::STAa => {
-						self.mmu.write(self.mar, self.mdr);
-					}
-					_ => {panic!("This code should be unreachable.");}
-				}
-			}
-			0x08 => {
-				match self.ir {
-					Opcode::LDAa | Opcode::ADCa | Opcode::LDXa | Opcode::LDYa | Opcode::CPXa | Opcode::INCa | Opcode::SYS => {
-						//waiting for read
-						self.pipeline_step += 1;
-					}
-					Opcode::STAa => {self.pipeline_step = 0x0A;}//waiting for read
-					_ => {panic!("This code should be unreachable.");}
-				}
-			}
-			0x09 => {
-				self.check_read_ready();
-				match self.ir {
-					Opcode::LDAa => {
-						self.a = self.mdr;
-						self.set_zero(self.a);
-						self.set_negative(self.a);
-						self.pipeline_step = 0x0A;
-					}
-					Opcode::ADCa => {
-						let b: u8 = self.mdr;
-						let (result, overflow) = self.a.overflowing_add(b);
-						self.set_zero(result);
-						self.set_negative(result);
-						self.set_carry(result <= self.a && b != 0);
-						self.set_overflow(overflow);
-						self.a = result;
-						self.pipeline_step = 0x0A;
-					}
-					Opcode::LDXa => {
-						self.x = self.mdr;
-						self.set_zero(self.x);
-						self.set_negative(self.x);
-						self.pipeline_step = 0x0A;
-					}
-					Opcode::LDYa => {
-						self.y = self.mdr;
-						self.set_zero(self.y);
-						self.set_negative(self.y);
-						self.pipeline_step = 0x0A;
-					}
-					Opcode::CPXa => {
-						let value: u8 = self.mdr;
-						let difference: u8 = self.x.wrapping_sub(value);
-						self.set_zero(difference);
-						self.set_negative(difference);
-						self.set_carry(self.x >= value);
-						self.pipeline_step = 0x0A;
-					}
-					Opcode::INCa => {
-						let mut value: u8 = self.mdr;
-						value = value.wrapping_add(1);
-						self.set_zero(value);
-						self.set_negative(value);
-						self.mdr = value;
-						self.pipeline_step += 1;
-						self.mmu.write(self.mar, self.mdr);
-					}
-					Opcode::SYS => {
-						if self.mdr != 0 {
-							print!("{}", ascii::ENCODER.get(&self.mdr).unwrap_or(&'\0'));
-							io::stdout().flush().expect("Could not flush output buffer");
-							self.mar = self.mar.wrapping_add(1);
-							self.pipeline_step = 0x08;
-							self.mmu.read(self.mar);
-						} else {
-							self.pipeline_step = 0x0A;
-						}
-					}
-					_ => {panic!("This code should be unreachable.");}
-				}
-			}
-			0x0A => {
-				//waiting for write and/or checking for interrupt
-				self.pipeline_step = 0x00;
-				if self.nv_bdizc & Self::INTERRUPT_FLAG == 0 {
-					let mut recv: bool = true;
-					while recv {
-						match self.interrupt_controller.io_rx.try_recv() {
-							Ok(specs) => {self.interrupt_controller.priority_queue.push(specs);}
-							Err(_) => {recv = false;}
-						}
-					}
-					if let Some(event) = self.interrupt_controller.priority_queue.pop() {
-						if let Some(interrupt) = self.interrupt_controller.io_devices.get(&event.iqr) {
-							if let Some(c) = ascii::ENCODER.get(&interrupt.get_out_buf()) {
-								print!("{}", c);
-								io::stdout().flush().expect("Could not flush output buffer");
-							}
-						} else {
-							panic!("Could not find I/O device Name: {}, IQR: {}", event.name, event.iqr);
-						}
-					}
-				}
-			}
-			_ => {panic!("This code should be unreachable.");}
+		/*Fetch, Decode, Execute are called in reverse order to prioritize memory access to the first function to be called.
+		The pipeline is running like an assembly line. If the pipeline doesn't stall too much, it should be able to execute
+		instructions faster than 1 instruction per instruction cycle, but probably under scalar speed.*/
+		for i in 0..self.execution_units.len() {
+			self.execute(i);
+		}
+		self.decode();
+		self.fetch_opcode();
+		//Allow memory access if nobody needs it in the next cycle
+		if self.pipe_mem_user == PipeMemUser::Complete {
+			self.pipe_mem_user = PipeMemUser::Free;
+			self.interrupt_check();//I put this here just so it does an interrupt check a couple of times per instruction cycle rather than every clock cycle
 		}
 	}
 }
@@ -285,66 +76,53 @@ impl Cpu {
 	const ZERO_FLAG: u8 = 0b0000_0010;
 	const CARRY_FLAG: u8 = 0b0000_0001;
 	
-	pub fn new(mem_tx: UnboundedSender<(u16, u8, bool)>, mem_rx: UnboundedReceiver<u8>) -> Self {
+	pub fn new(channels: [(Sender<MemEvent>, Receiver<MemEvent>); N_WAYS as usize]) -> Self {
 		let cpu: Self = Self {
 			specs: HardwareSpecs::new("Cpu"),
 			interrupt_controller: InterruptController::new(),
-			mmu: Mmu::new(mem_tx, mem_rx),
+			mmu: Mmu::new(channels),
 			cpu_clock_counter: 0,
-			pc: 0xfffc,//0xfffc/d is the reset vector
-			ir: Opcode::BRK,
+			instruction_counter: 0,
+			pc: 0x0000,
+			ir: None,
 			a: 0x00,
 			x: 0x00,
 			y: 0x00,
 			nv_bdizc: 0b00100000,
-			buf: 0x00,
-			pipeline_step: 0x00,
-			mar: 0x0000,
-			mdr: 0x00
+			execution_units: [ExecutionUnit::new(0), ExecutionUnit::new(1)],
+			pipe_mem_user: PipeMemUser::Free
 		};
-		//cpu.mmu.memory.set_references(&mut cpu.mar, &mut cpu.mdr, &cpu.pipeline_step);
 		cpu.log("Created");
-		return cpu;
+		cpu
 	}
 	
-	/**If the Memory has finished performing the read operation, this function "opens the bus lines" and sets the MDR to the value that was read. Otherwise, it does nothing.*/
-	pub fn check_read_ready(&mut self) {
-		if let Ok(mdr) = self.mmu.rx.try_recv() {self.mdr = mdr;}
+	fn sys_out_char(c: char) {
+		print!("{}", c);
+		io::stdout().flush().expect("Could not flush output buffer");//This prints each character one at a time immediately, rather than printing a buffer of many characters
 	}
 	
-	/**Sets the low byte of the MAR.*/
-	pub fn set_mar_low(&mut self, low_byte: u8) {self.mar = (self.mar & 0xFF00) | (low_byte as u16);}
-	/**Sets the high byte of the MAR.*/
-	pub fn set_mar_high(&mut self, high_byte: u8) {self.mar = (self.mar & 0x00FF) | ((high_byte as u16) << 8);}
+	fn sys_out_u8(n: u8) {
+		print!("{:X}", n);
+		io::stdout().flush().expect("Could not flush output buffer");
+	}
 	
+	///Sets the pipe_mem_user and returns Cache::read(addr)
+	fn read(&mut self, addr: u16, user: PipeMemUser) -> Result<Option<u8>,()> {
+		self.pipe_mem_user = user;
+		self.mmu.cache.read(addr)
+	}
+	///Sets the pipe_mem_user and returns Cache::write(addr, value)
+	fn write(&mut self, addr: u16, value: u8, user: PipeMemUser) -> bool {
+		self.pipe_mem_user = user;
+		self.mmu.cache.write(addr, value)
+	}
+	
+	//functions to set the status register bit flags
 	fn set_negative(&mut self, n: u8) {
 		if n & Self::NEGATIVE_FLAG == Self::NEGATIVE_FLAG {
 			self.nv_bdizc |= Self::NEGATIVE_FLAG;
 		} else {
 			self.nv_bdizc &= !Self::NEGATIVE_FLAG;
-		}
-	}
-	fn set_overflow(&mut self, v: bool) {
-		if v {
-			self.nv_bdizc |= Self::OVERFLOW_FLAG;
-		} else {
-			self.nv_bdizc &= !Self::OVERFLOW_FLAG;
-		}
-	}
-	fn set_break(&mut self, set: bool) {
-		if set {
-			self.nv_bdizc |= Self::BREAK_FLAG;
-			self.nv_bdizc &= !Self::INTERRUPT_FLAG;
-		} else {
-			self.nv_bdizc &= !Self::BREAK_FLAG;
-			self.nv_bdizc |= Self::INTERRUPT_FLAG;
-		}
-	}
-	fn set_interrupt(&mut self, set: bool) {
-		if set {
-			self.nv_bdizc |= Self::INTERRUPT_FLAG;
-		} else {
-			self.nv_bdizc &= !Self::INTERRUPT_FLAG;
 		}
 	}
 	fn set_zero(&mut self, n: u8) {
@@ -362,12 +140,339 @@ impl Cpu {
 		}
 	}
 	
-	/**Loads the PC into the MAR, increments the pipeline_step, tells the MMU to request a read operation in memory, and increments the PC.*/
-	fn fetch(&mut self) {
-		self.mar = self.pc;
-		self.pipeline_step += 1;
-		self.mmu.read(self.mar);
-		self.pc = self.pc.wrapping_add(1);
+	/**Clears all buffers if there's a BRK or branch to prevent executing more instructions.
+	There's no branch speculation. So the pipeline is cleared on a branch, and it continues as normal otherwise.*/
+	pub fn clear_pipeline(&mut self) {
+		self.ir = None;
+		self.execution_units.iter_mut().for_each(|exe| {exe.busy = false;});
+	}
+	
+	///Loads the PC into the MAR, increments the pipeline_step, tells the MMU to request a read operation in memory, and increments the PC.
+	fn fetch_opcode(&mut self) {
+		if self.ir.is_some() {return;}
+		match self.pipe_mem_user {
+			PipeMemUser::Fetch | PipeMemUser::Free => {
+				if let Ok(Some(num)) = self.read(self.pc, PipeMemUser::Fetch) {
+					let opcode: Opcode = Opcode::from(num).expect("Received invalid opcode.");
+					self.ir = Some((opcode, None, None));
+					self.pc = self.pc.wrapping_add(1);
+					self.pipe_mem_user = PipeMemUser::Complete;
+				}
+			}
+			_ => {}
+		}
+	}
+	///Like fetch_opcode() but the value is returned instead of loaded into the IR
+	fn fetch_operand(&mut self) -> Option<u8> {
+		if self.ir.is_none() {return None;}
+		match self.pipe_mem_user {
+			PipeMemUser::Decode | PipeMemUser::Free => {
+				if let Ok(Some(num)) = self.read(self.pc, PipeMemUser::Decode) {
+					self.pc = self.pc.wrapping_add(1);
+					self.pipe_mem_user = PipeMemUser::Complete;
+					return Some(num);
+				}
+			}
+			_ => {}
+		}
+		None
+	}
+	///Decodes the value in the IR and loads it into an available execution unit if finished decoding
+	fn decode(&mut self) {
+		if self.ir.is_none() {return;}
+		let Some((opcode, mut operand1, mut operand2)) = self.ir.to_owned() else {return;};
+		//see which storage areas will be affected in the next cycle
+		let mut affected_storages: Vec<Storage> = Vec::new();
+		self.execution_units.iter_mut().filter(|exe| {exe.busy}).for_each(|exe| {
+			affected_storages.append(&mut exe.ir.0.affected_storage());
+		});
+		//get operands
+		match opcode {
+			Opcode::TXA | Opcode::TYA | Opcode::TAX | Opcode::TAY | Opcode::NOP | Opcode::BRK => {
+				operand1 = Some(0x00);
+				operand2 = Some(0x00);
+			}
+			Opcode::LDAi | Opcode::LDXi | Opcode::LDYi | Opcode::BNEr => {
+				if operand1.is_none() {
+					operand1 = self.fetch_operand();
+				}
+				operand2 = Some(0x00);
+			}
+			Opcode::LDAa | Opcode::STAa | Opcode::ADCa | Opcode::LDXa | Opcode::LDYa | Opcode::CPXa | Opcode::INCa => {
+				if operand1.is_none() {
+					operand1 = self.fetch_operand();
+				} else if operand2.is_none() {
+					operand2 = self.fetch_operand();
+				}
+			}
+			Opcode::SYS => {
+				//We can't decode a SYS if the execution units will affect the X register
+				if !affected_storages.contains(&Storage::X) {
+					match self.x {
+						0x01 | 0x02 => {
+							operand1 = Some(0x00);
+							operand2 = Some(0x00);
+						}
+						0x03 => {
+							if operand1.is_none() {
+								operand1 = self.fetch_operand();
+							} else if operand2.is_none() {
+								operand2 = self.fetch_operand();
+							}
+						}
+						_ => {panic!("Invalid arguments for system call.");}
+					}
+				}
+			}
+		}
+		self.ir = Some((opcode.clone(), operand1, operand2));
+		//if the instruction is ready to be sent to an execution unit, and if the execution units are ready to take the instruction
+		if !opcode.dependent_storage().iter().any(|storage| {affected_storages.contains(storage)}) {
+			let Some(exe) = self.execution_units.iter_mut().find(|exe| {!exe.busy}) else {return;};
+			if let Some((opcode, Some(operand1), Some(operand2))) = self.ir.to_owned() {
+				exe.set_instruction(self.pc, (opcode, operand1, operand2));
+				self.ir = None;
+			}
+		}
+	}
+	///Executes the instruction in the execution unit at the given index of the exe_units array
+	fn execute(&mut self, exe_index: usize) {
+		if !self.execution_units[exe_index].busy {return;}
+		match self.execution_units[exe_index].ir.0 {
+			Opcode::LDAi => {
+				self.a = self.execution_units[exe_index].ir.1;
+				self.set_zero(self.a);
+				self.set_negative(self.a);
+				self.execution_units[exe_index].busy = false;
+				self.instruction_counter += 1;
+			}
+			Opcode::TXA => {
+				self.a = self.x;
+				self.set_zero(self.a);
+				self.set_negative(self.a);
+				self.execution_units[exe_index].busy = false;
+				self.instruction_counter += 1;
+			}
+			Opcode::TYA => {
+				self.a = self.y;
+				self.set_zero(self.a);
+				self.set_negative(self.a);
+				self.execution_units[exe_index].busy = false;
+				self.instruction_counter += 1;
+			}
+			Opcode::LDXi => {
+				self.x = self.execution_units[exe_index].ir.1;
+				self.set_zero(self.x);
+				self.set_negative(self.x);
+				self.execution_units[exe_index].busy = false;
+				self.instruction_counter += 1;
+			}
+			Opcode::TAX => {
+				self.x = self.a;
+				self.set_zero(self.x);
+				self.set_negative(self.x);
+				self.execution_units[exe_index].busy = false;
+				self.instruction_counter += 1;
+			}
+			Opcode::LDYi => {
+				self.y = self.execution_units[exe_index].ir.1;
+				self.set_zero(self.y);
+				self.set_negative(self.y);
+				self.execution_units[exe_index].busy = false;
+				self.instruction_counter += 1;
+			}
+			Opcode::TAY => {
+				self.y = self.a;
+				self.set_zero(self.y);
+				self.set_negative(self.y);
+				self.execution_units[exe_index].busy = false;
+				self.instruction_counter += 1;
+			}
+			Opcode::NOP => {
+				self.execution_units[exe_index].busy = false;
+				self.instruction_counter += 1;
+			}
+			Opcode::BRK => {
+				//I'm pretty sure the BRK actually takes 7 cycles because it messes with the stack
+				self.nv_bdizc |= Self::BREAK_FLAG;
+				self.nv_bdizc |= Self::INTERRUPT_FLAG;//doesn't check for an interrupt at the end of this instruction cycle
+				self.clear_pipeline();
+				self.instruction_counter += 1;
+			}
+			Opcode::BNEr => {
+				if self.nv_bdizc & Self::ZERO_FLAG == 0 {
+					self.pc = (self.execution_units[exe_index].ip as i16).wrapping_add(self.execution_units[exe_index].ir.1 as i8 as i16) as u16;
+					self.clear_pipeline();
+				}
+				self.execution_units[exe_index].busy = false;
+				self.instruction_counter += 1;
+			}
+			Opcode::SYS if self.x == 1 => {
+				Self::sys_out_u8(self.y);
+				self.execution_units[exe_index].busy = false;
+				self.instruction_counter += 1;
+			}
+			_ => {//instructions that use memory
+				if self.pipe_mem_user == PipeMemUser::Free || matches!(self.pipe_mem_user, PipeMemUser::Execute(id) if id == self.execution_units[exe_index].id) {
+					match self.execution_units[exe_index].ir.0 {
+						Opcode::LDAa => {
+							if let Ok(Some(num)) = self.read(u16::from_le_bytes([self.execution_units[exe_index].ir.1, self.execution_units[exe_index].ir.2]), PipeMemUser::Execute(self.execution_units[exe_index].id)) {
+								self.a = num;
+								self.set_zero(self.a);
+								self.set_negative(self.a);
+								self.execution_units[exe_index].busy = false;
+								self.pipe_mem_user = PipeMemUser::Complete;
+								self.instruction_counter += 1;
+							}
+						}
+						Opcode::STAa => {
+							self.write(u16::from_le_bytes([self.execution_units[exe_index].ir.1, self.execution_units[exe_index].ir.2]), self.a, PipeMemUser::Execute(self.execution_units[exe_index].id));
+							self.execution_units[exe_index].busy = false;
+							self.pipe_mem_user = PipeMemUser::Complete;
+							self.instruction_counter += 1;
+						}
+						Opcode::ADCa => {
+							if let Ok(Some(num)) = self.read(u16::from_le_bytes([self.execution_units[exe_index].ir.1, self.execution_units[exe_index].ir.2]), PipeMemUser::Execute(self.execution_units[exe_index].id)) {
+								let (result, overflow) = self.a.overflowing_add(num);
+								self.set_zero(result);
+								self.set_negative(result);
+								self.set_carry(result <= self.a && num != 0);
+								if overflow {
+									self.nv_bdizc |= Self::OVERFLOW_FLAG;
+								} else {
+									self.nv_bdizc &= !Self::OVERFLOW_FLAG;
+								}
+								self.a = result;
+								self.execution_units[exe_index].busy = false;
+								self.pipe_mem_user = PipeMemUser::Complete;
+								self.instruction_counter += 1;
+							}
+						}
+						Opcode::LDXa => {
+							if let Ok(Some(num)) = self.read(u16::from_le_bytes([self.execution_units[exe_index].ir.1, self.execution_units[exe_index].ir.2]), PipeMemUser::Execute(self.execution_units[exe_index].id)) {
+								self.x = num;
+								self.set_zero(self.x);
+								self.set_negative(self.x);
+								self.execution_units[exe_index].busy = false;
+								self.pipe_mem_user = PipeMemUser::Complete;
+								self.instruction_counter += 1;
+							}
+						}
+						Opcode::LDYa => {
+							if let Ok(Some(num)) = self.read(u16::from_le_bytes([self.execution_units[exe_index].ir.1, self.execution_units[exe_index].ir.2]), PipeMemUser::Execute(self.execution_units[exe_index].id)) {
+								self.y = num;
+								self.set_zero(self.y);
+								self.set_negative(self.y);
+								self.execution_units[exe_index].busy = false;
+								self.pipe_mem_user = PipeMemUser::Complete;
+								self.instruction_counter += 1;
+							}
+						}
+						Opcode::CPXa => {
+							if let Ok(Some(num)) = self.read(u16::from_le_bytes([self.execution_units[exe_index].ir.1, self.execution_units[exe_index].ir.2]), PipeMemUser::Execute(self.execution_units[exe_index].id)) {
+								let difference: u8 = self.x.wrapping_sub(num);
+								self.set_zero(difference);
+								self.set_negative(difference);
+								self.set_carry(self.x >= num);
+								self.execution_units[exe_index].busy = false;
+								self.pipe_mem_user = PipeMemUser::Complete;
+								self.instruction_counter += 1;
+							}
+						}
+						Opcode::INCa => {
+							let addr: u16 = u16::from_le_bytes([self.execution_units[exe_index].ir.1, self.execution_units[exe_index].ir.2]);
+							if let Ok(Some(mut num)) = self.read(addr, PipeMemUser::Execute(self.execution_units[exe_index].id)) {
+								num = num.wrapping_add(1);
+								self.set_zero(num);
+								self.set_negative(num);
+								self.write(addr, num, PipeMemUser::Execute(self.execution_units[exe_index].id));
+								self.execution_units[exe_index].busy = false;
+								self.pipe_mem_user = PipeMemUser::Complete;
+								self.instruction_counter += 1;
+							}
+						}
+						Opcode::SYS if self.x != 1 => {
+							match self.x {
+								0x02 => {
+									let addr: u16 = u16::from_le_bytes([self.execution_units[exe_index].ir.1, self.execution_units[exe_index].ir.2]).wrapping_add(self.y as u16);
+									if let Ok(Some(num)) = self.read(addr, PipeMemUser::Execute(self.execution_units[exe_index].id)) {
+										Self::sys_out_char(ascii::ENCODER.get(&num).unwrap_or(&'\0').clone());
+										self.execution_units[exe_index].busy = false;
+										self.pipe_mem_user = PipeMemUser::Complete;
+										self.instruction_counter += 1;
+									}
+								}
+								0x03 => {
+									if let Ok(Some(num)) = self.read(u16::from_le_bytes([self.execution_units[exe_index].ir.1, self.execution_units[exe_index].ir.2]), PipeMemUser::Execute(self.execution_units[exe_index].id)) {
+										let c: char = ascii::ENCODER.get(&num).unwrap_or(&'\0').clone();
+										if c != '\0' {
+											Self::sys_out_char(c);
+											let (result, overflow) = self.execution_units[exe_index].ir.1.overflowing_add(1);
+											self.execution_units[exe_index].ir.1 = result;
+											if overflow {
+												self.execution_units[exe_index].ir.2 = self.execution_units[exe_index].ir.2.wrapping_add(1);
+											}
+										} else {
+											self.execution_units[exe_index].busy = false;
+											self.pipe_mem_user = PipeMemUser::Complete;
+											self.instruction_counter += 1;
+										}
+									}
+								}
+								_ => {panic!("Invalid arguments for system call")}
+							}
+						}
+						_ => {}
+					}
+				}
+			}
+		}
+	}
+	///Immediately prints the ASCII representation of the byte in the device's output buffer
+	fn interrupt_check(&mut self) {
+		if self.nv_bdizc & Self::INTERRUPT_FLAG == 0 {
+			let mut recv: bool = true;
+			while recv {
+				match self.interrupt_controller.io_rx.try_recv() {
+					Ok(specs) => {self.interrupt_controller.priority_queue.push(specs);}
+					Err(_) => {recv = false;}
+				}
+			}
+			if let Some(event) = self.interrupt_controller.priority_queue.pop() {
+				if let Some(interrupt) = self.interrupt_controller.io_devices.get(&event.iqr) {
+					if let Some(c) = ascii::ENCODER.get(&interrupt.get_out_buf()) {
+						Self::sys_out_char(c.to_owned());
+					}
+				} else {
+					panic!("Could not find I/O device Name: {}, IQR: {}", event.name, event.iqr);
+				}
+			}
+		}
+	}
+}
+
+struct ExecutionUnit {
+	///Index in the cpu's array
+	id: u8,
+	///Points to the byte after the last byte of the instruction
+	ip: u16,
+	ir: (Opcode, u8, u8),
+	busy: bool
+}
+
+impl ExecutionUnit {
+	fn new(id: u8) -> Self {
+		Self {
+			id,
+			ip: 0x00,
+			ir: (Opcode::BRK, 0x00, 0x00),
+			busy: false
+		}
+	}
+	fn set_instruction(&mut self, ip: u16, ir: (Opcode, u8, u8)) {
+		self.ip = ip;
+		self.ir = ir;
+		self.busy = true;
 	}
 }
 
@@ -376,7 +481,7 @@ Lowercase 4th letter indicates addressing mode.
 i = immediate, a = absolute, r = relative, none = accumulator.
 Parameters indicate operands.*/
 #[repr(u8)]
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 enum Opcode {
 	LDAi = 0xA9,     //load immediate u8 into a
 	LDAa = 0xAD,     //load value from memory into a
@@ -400,7 +505,7 @@ enum Opcode {
 
 impl Opcode {
 	fn from(opcode: u8) -> Option<Self> {
-		return match opcode {
+		match opcode {
 			0xA9 => {Some(Opcode::LDAi)}
 			0xAD => {Some(Opcode::LDAa)}
 			0x8D => {Some(Opcode::STAa)}
@@ -422,4 +527,66 @@ impl Opcode {
 			_ => {None}
 		}
 	}
+	///All the storages that this instruction MAY affect
+	fn affected_storage(&self) -> Vec<Storage> {
+		match self {
+			Opcode::LDAi => {vec![Storage::A, Storage::ZeroFlag]}
+			Opcode::LDAa => {vec![Storage::A, Storage::ZeroFlag]}
+			Opcode::STAa => {vec![Storage::Memory]}
+			Opcode::TXA => {vec![Storage::A, Storage::ZeroFlag]}
+			Opcode::TYA => {vec![Storage::A, Storage::ZeroFlag]}
+			Opcode::ADCa => {vec![Storage::A, Storage::ZeroFlag]}
+			Opcode::LDXi => {vec![Storage::X, Storage::ZeroFlag]}
+			Opcode::LDXa => {vec![Storage::X, Storage::ZeroFlag]}
+			Opcode::TAX => {vec![Storage::X, Storage::ZeroFlag]}
+			Opcode::LDYi => {vec![Storage::Y, Storage::ZeroFlag]}
+			Opcode::LDYa => {vec![Storage::Y, Storage::ZeroFlag]}
+			Opcode::TAY => {vec![Storage::Y, Storage::ZeroFlag]}
+			Opcode::CPXa => {vec![Storage::ZeroFlag]}
+			Opcode::BNEr => {vec![Storage::PC]}
+			Opcode::INCa => {vec![Storage::Memory, Storage::ZeroFlag]}
+			_ => {vec![]}
+		}
+	}
+	///All the storages that this instruction MAY depend on
+	fn dependent_storage(&self) -> Vec<Storage> {
+		match self {
+			Opcode::LDAa => {vec![Storage::Memory]}
+			Opcode::STAa => {vec![Storage::A]}
+			Opcode::TXA => {vec![Storage::X]}
+			Opcode::TYA => {vec![Storage::Y]}
+			Opcode::ADCa => {vec![Storage::A, Storage::Memory]}
+			Opcode::LDXa => {vec![Storage::Memory]}
+			Opcode::TAX => {vec![Storage::A]}
+			Opcode::LDYa => {vec![Storage::Memory]}
+			Opcode::TAY => {vec![Storage::A]}
+			Opcode::CPXa => {vec![Storage::X, Storage::Memory]}
+			Opcode::BNEr => {vec![Storage::ZeroFlag]}
+			Opcode::INCa => {vec![Storage::Memory]}
+			Opcode::SYS => {vec![Storage::X, Storage::Y, Storage::Memory]}
+			_ => {vec![]}
+		}
+	}
+}
+
+///Tracks which part of the CPU is using the memory between clock cycles to prevent data races and data loss
+#[derive(PartialEq, Clone)]
+enum PipeMemUser {
+	Fetch,
+	Decode,
+	Execute(u8),
+	///Users set pipe_mem_user to Complete when they finish, as opposed to Free because only one user can access memory in a cycle
+	Complete,
+	///If pipe_mem_user is Complete at the end of a cpu cycle, it is set to free to allow users to access memory in the next cycle
+	Free
+}
+
+#[derive(PartialEq)]
+enum Storage {
+	A,
+	X,
+	Y,
+	ZeroFlag,
+	Memory,
+	PC
 }

@@ -1,5 +1,6 @@
 use {
 	crate::hardware::{
+		hardware::{Hardware, HardwareSpecs},
 		imp::interrupt::{Interrupt, InterruptSpecs},
 		keyboard::Keyboard
 	},
@@ -18,6 +19,7 @@ the CPU gathers all the received InterruptSpecs from the io_rx and pushes them i
 Immediately after, the CPU pops an InterruptSpecs from the priority queue, uses its IQR to lookup the Interrupt device in the io_devices HashMap,
 and reads the value in that devices output buffer.*/
 pub struct InterruptController {
+	specs: HardwareSpecs,
 	pub priority_queue: BinaryHeap<InterruptSpecs>,
 	pub io_devices: HashMap<u8, Box<dyn Interrupt>>,
 	pub io_rx: UnboundedReceiver<InterruptSpecs>,
@@ -31,13 +33,20 @@ impl InterruptController {
 		let running: Arc<AtomicBool> = Arc::new(AtomicBool::new(true));
 		let keyboard: Box<Keyboard> = Box::new(Keyboard::new(tx.clone(), running.clone()));
 		map.insert(keyboard.get_interrupt_specs().iqr, keyboard);
-		Self {
+		let int_ctrl: Self = Self {
+			specs: HardwareSpecs::new("Interrupt Controller"),
 			priority_queue: BinaryHeap::new(),
 			io_devices: map,
 			io_rx: rx,
 			running
-		}
+		};
+		int_ctrl.log("Created");
+		int_ctrl
 	}
+}
+
+impl Hardware for InterruptController {
+	fn get_specs(&self) -> &HardwareSpecs {&self.specs}
 }
 
 //RAII - stops dependent tokio threads gracefully on destruction

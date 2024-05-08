@@ -1,10 +1,44 @@
 See README.md in master branch for details about the project.
-# Notes for Lab 2
-* The hex for the program is automatically loaded into the emulator at runtime,
-so you just need to run the emulator, and it will run the program.
-* If you wish to look through the 6502 assembler code, I recommend downloading bubbleSort.asm6502,
-and opening it in the text editor I made.
-* You can find the assembler/text-editor I made for this lab here: https://github.com/eclipse-909/Assembler-6502
+# Notes for Final Project
+### Clock Time Interval
+* Between pulses, I tell the thread to sleep for 0 seconds, and I call the sleep
+function every 30 clock pulses. The program only takes a few seconds
+to finish. If you want to slow it down, you can increase the clock interval or increase
+the number of times sleep is called. Sleeping for 0 seconds does introduce a significant
+delay due to scheduling, so I recommend increasing the number of times the sleep function
+is called instead of increasing the clock interval.
+### Interrupt and Keyboard Input
+* During the time the program is running, if click on the console,
+you can type characters on your keyboard, and they will be immediately printed back
+to the console. They will have virtually no effect on the program.
+It's just so you can verify the interrupts are working correctly.
+### Additional Features
+
+####  Pipelining
+* Fetch/Decode/Execute parts of the CPU can run at the same time, however only one
+part may access memory at the same time. Since most clock cycles require memory access,
+this only slightly increases efficiency and speed.
+#### Multiple Execution Units
+* There are 2 execution units, but the second one basically
+never gets used because only one part of the CPU can access memory at a time.
+It would work better if I had an operating system that used virtual addresses which mapped
+to addresses that were split up between memory modules. That way different memory modules
+can be accessed at a time by the CPU.
+#### Memory Interleaving
+* Memory is broken up 8-ways to work well with a wide path memory access
+and cache.
+#### Cache
+* One cache module with 16 lines and 8-byte lines, for a total of 128 bytes.
+This is the biggest reduction in clock cycles.
+#### Performance
+* Before implementing the additional features, it took over 20,000 cycles to run the program.
+Run the program and the new performance is outputted to the console.
+### Known Issues
+* The program should run and work as intended, but you may notice that the performance specs
+are different every time you run it. There are no random numbers or additional input
+(besides the interrupt devices which shouldn't have an effect on the performance), so we should
+expect the same numbers every time, but that's not what we get. It works so I'm not going to
+try to figure out what's causing it.
 # Download and run on your device
 Your computer might tell you not to trust the executable if you download it.
 If you don't want to take my word for it, then you just have to recompile the code yourself.
