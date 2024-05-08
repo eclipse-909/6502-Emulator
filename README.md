@@ -31,13 +31,13 @@ and cache.
 * One cache module with 16 lines and 8-byte lines, for a total of 128 bytes.
 This is the biggest reduction in clock cycles.
 #### Performance
-* Before implementing the additional features, it took over 20,000 cycles to run the program.
+* Before implementing the additional features, it took 21,302 cycles to run the program.
 Run the program and the new performance is outputted to the console.
 ### Known Issues
 * The program should run and work as intended, but you may notice that the performance specs
 are different every time you run it. There are no random numbers or additional input
 (besides the interrupt devices which shouldn't have an effect on the performance), so we should
-expect the same numbers every time, but that's not what we get. It works so I'm not going to
+expect the same numbers every time, but that's not what we get. It works, so I'm not going to
 try to figure out what's causing it.
 # Download and run on your device
 Your computer might tell you not to trust the executable if you download it.
