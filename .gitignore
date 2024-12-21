@@ -1,4 +1,3 @@
 /target
 /.idea
-.gitignore
-!/target/debug/Rust-422-tsiraM.exe
+/.git
